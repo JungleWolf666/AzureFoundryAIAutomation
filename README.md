@@ -1,4 +1,10 @@
-# Azure Foundry 全生命周期统一脚本
+# Azure Foundry AI Automation
+
+用于 Azure Foundry AI 生命周期自动化的 Bash 和 PowerShell 脚本集合，支持订阅准备、Foundry 资源创建、模型批量部署和配额扩容。
+
+GitHub 仓库：<https://github.com/JungleWolf666/AzureFoundryAIAutomation>
+
+本仓库中的 CSV 是脱敏模板。使用前请复制并填写您自己的 Azure 配置，不要把真实租户、订阅或计费信息提交回公共仓库。
 
 把原来四个独立脚本合并为一个，所有参数集中在同一个 CSV 中维护：
 
@@ -26,18 +32,37 @@
    `gpt-5.6-sol-dz=gpt-5.6-sol:::DataZoneStandard`。
 - 如果部署名必须与模型名完全一致，则需要使用两个不同的 Foundry 账户。
 
-## 文件
+## 仓库文件
 
 ```text
-Azure_Foundry_AI_Automation/
-├── Azure_Foundry_AI_Automation.ps1   # Windows 推荐
-├── Azure_Foundry_AI_Automation.sh    # macOS / Linux / WSL
-├── Azure_Foundry_AI_Plan.csv        # 唯一配置来源
-├── logs/                         # 运行日志
-└── results/                      # 每阶段结果 CSV
+AzureFoundryAIAutomation/
+├── Azure_Foundry_AI_Automation.ps1   # PowerShell 版本
+├── Azure_Foundry_AI_Automation.sh    # Bash 版本
+├── Azure_Foundry_AI_Plan.csv          # 脱敏配置模板
+└── README.md                          # 使用说明
 ```
 
-两个版本功能一致，选一个运行即可。
+两个脚本功能一致，按操作系统选择一个运行即可。脚本运行后会在当前目录自动创建 `logs/` 和 `results/` 文件夹；这些运行产物不纳入仓库提交。
+
+## 获取与快速开始
+
+### 方式一：克隆仓库
+
+```bash
+git clone https://github.com/JungleWolf666/AzureFoundryAIAutomation.git
+cd AzureFoundryAIAutomation
+```
+
+### 方式二：下载 ZIP
+
+在 GitHub 页面选择 **Code → Download ZIP**，解压后进入项目目录。
+
+### 开始前的操作
+
+1. 复制 `Azure_Foundry_AI_Plan.csv`，或直接编辑该模板的副本。
+2. 按照下方字段说明替换所有占位值，例如 `BILLING-ACCOUNT-ID`、`SUBSCRIPTION-DEMO` 和 `demo-*` 资源名称。
+3. 确认 Azure CLI 已登录并具备对应阶段的权限。
+4. 先使用预演模式验证配置，再执行正式命令。
 
 ## 运行前提
 
