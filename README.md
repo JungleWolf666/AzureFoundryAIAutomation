@@ -2,9 +2,7 @@
 
 用于 Azure Foundry AI 生命周期自动化的 Bash 和 PowerShell 脚本集合，支持订阅准备、Foundry 资源创建、模型批量部署和配额扩容。
 
-GitHub 仓库：<https://github.com/JungleWolf666/AzureFoundryAIAutomation>
-
-本仓库中的 CSV 是脱敏模板。使用前请复制并填写您自己的 Azure 配置，不要把真实租户、订阅或计费信息提交回公共仓库。
+这是一个公开的 GitHub 仓库。请在本地填写 CSV 配置，切勿将真实租户、订阅或计费信息提交回仓库。
 
 把原来四个独立脚本合并为一个，所有参数集中在同一个 CSV 中维护：
 
@@ -59,7 +57,7 @@ cd AzureFoundryAIAutomation
 
 ### 开始前的操作
 
-1. 复制 `Azure_Foundry_AI_Plan.csv`，或直接编辑该模板的副本。
+1. 在本地复制 `Azure_Foundry_AI_Plan.csv` 并填写配置。
 2. 按照下方字段说明替换所有占位值，例如 `BILLING-ACCOUNT-ID`、`SUBSCRIPTION-DEMO` 和 `demo-*` 资源名称。
 3. 确认 Azure CLI 已登录并具备对应阶段的权限。
 4. 先使用预演模式验证配置，再执行正式命令。
