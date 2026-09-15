@@ -1,6 +1,6 @@
 # Azure Foundry AI Automation
 
-用于 Azure Foundry AI 生命周期自动化的 Bash 和 PowerShell 脚本集合，支持订阅准备、Foundry 资源创建、模型批量部署和配额扩容。
+用于 Azure Foundry AI 生命周期自动化的 Bash 和 PowerShell 脚本集合，支持订阅准备、Foundry 资源创建、按剩余配额批量部署模型，以及将已有部署扩容至可用配额上限。
 
 这是一个公开的 GitHub 仓库。请在本地填写 CSV 配置，切勿将真实租户、订阅或计费信息提交回仓库。
 
