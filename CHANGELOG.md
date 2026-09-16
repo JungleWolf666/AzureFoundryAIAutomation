@@ -4,8 +4,10 @@
 
 ### 修复
 
-- 将 CSV 回填前的备份统一保存到 CSV 所在目录的 `csv_backups/`，避免与脚本备份混淆。
-- 增加 `.gitignore`，避免 CSV 备份、日志和结果文件进入公开仓库。
+- 将 CSV 回填前的备份统一保存到 CSV 所在目录的 `csv_backups/`，文件名包含原 CSV 名称和时间戳，避免与脚本备份混淆。
+- PowerShell 和 Bash 两个版本的 CSV 备份行为保持一致。
+- 增加根目录和 Delivery 目录的 `.gitignore`，避免 `csv_backups/`、`logs/`、`results/` 和 `.bak.*` 文件进入公开仓库。
+- 版本查询命令现在返回 `v1.0.1`。
 
 ## [1.0.0] - 2026-09-16
 
