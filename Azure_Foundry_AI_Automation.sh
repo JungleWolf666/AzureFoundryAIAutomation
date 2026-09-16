@@ -24,7 +24,7 @@ fi
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.0.1"
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 TENANT_ID=""
@@ -428,7 +428,10 @@ with open(csv_path, encoding='utf-8-sig', newline='') as handle:
     fields = reader.fieldnames
     rows = list(reader)
 
-shutil.copy2(csv_path, f'{csv_path}.bak.{datetime.now():%Y%m%d_%H%M%S_%f}')
+backup_dir = os.path.join(os.path.dirname(csv_path) or '.', 'csv_backups')
+os.makedirs(backup_dir, exist_ok=True)
+backup_name = f'{os.path.basename(csv_path)}.bak.{datetime.now():%Y%m%d_%H%M%S_%f}'
+shutil.copy2(csv_path, os.path.join(backup_dir, backup_name))
 for row in rows:
     if row['SubscriptionName'] == name:
         row['SubscriptionId'] = subscription_id

@@ -26,7 +26,7 @@ param(
     [switch]$Help
 )
 
-$ScriptVersion = '1.0.0'
+$ScriptVersion = '1.0.1'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -384,7 +384,11 @@ function Save-ResultCsv {
 
 function Update-PlanSubscriptionId {
     param([object[]]$Rows, [string]$SubscriptionName, [string]$SubscriptionId)
-    $backup = "{0}.bak.{1}" -f $Csv, (Get-Date -Format 'yyyyMMdd_HHmmss_ffffff')
+    $csvDirectory = Split-Path -Parent $Csv
+    $backupDirectory = Join-Path $csvDirectory 'csv_backups'
+    New-Item -ItemType Directory -Path $backupDirectory -Force | Out-Null
+    $backupName = "{0}.bak.{1}" -f (Split-Path -Leaf $Csv), (Get-Date -Format 'yyyyMMdd_HHmmss_ffffff')
+    $backup = Join-Path $backupDirectory $backupName
     Copy-Item -LiteralPath $Csv -Destination $backup -Force
     foreach ($row in $Rows) {
         if ($row.SubscriptionName -eq $SubscriptionName) { $row.SubscriptionId = $SubscriptionId }

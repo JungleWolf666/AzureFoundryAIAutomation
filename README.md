@@ -1,6 +1,6 @@
 # Azure Foundry AI Automation
 
-当前版本：`v1.0.0` · [更新记录](CHANGELOG.md)
+当前版本：`v1.0.1` · [更新记录](CHANGELOG.md)
 
 用于 Azure Foundry AI 生命周期自动化的 Bash 和 PowerShell 脚本集合，支持订阅准备、Foundry 资源创建、按剩余配额批量部署模型，以及将已有部署扩容至可用配额上限。
 
@@ -302,7 +302,7 @@ bash Azure_Foundry_AI_Automation.sh --tenant-id "<TENANT-ID>"
 
 #### 阶段 1：单独创建 Azure 订阅
 > 依赖 CSV 字段：`BillingAccountName`、`EnrollmentAccountName`、`SubscriptionName`  
-> 执行后自动回填 `SubscriptionId` 并生成 `.bak` 备份文件。
+> 执行后自动回填 `SubscriptionId`，并在 CSV 所在目录的 `csv_backups/` 中生成带时间戳的 CSV 备份文件。
 
 ```powershell
 # 预演
@@ -396,7 +396,7 @@ bash Azure_Foundry_AI_Automation.sh --tenant-id "<TENANT-ID>" --stage All
 - 部署前校验订阅 ID、订阅名和租户三者一致，避免资源建到错误订阅
 - 已存在且配置一致的资源会跳过；配置冲突会标记失败而不是覆盖
 - 不删除任何资源
-- 回填 CSV 前自动生成 `.bak.<时间戳>` 备份，并使用原子替换写入
+- 回填 CSV 前自动将原文件备份到 `csv_backups/`，并使用原子替换写入；该目录专门保存 CSV 历史备份，不是脚本备份目录
 - 未注册 `Microsoft.CognitiveServices` 时自动注册并记录到日志
 - 阶段 1 仅调用订阅别名创建 API；CSP 订阅不会因为运行阶段 1 而获得创建权限
 

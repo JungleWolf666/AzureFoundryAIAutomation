@@ -1,0 +1,4 @@
+csv_backups/
+logs/
+results/
+*.bak.*
