@@ -32,6 +32,7 @@ STAGE=""
 DRY_RUN=false
 BROWSER_LOGIN=false
 CREATE_DELAY_SECONDS=10
+CREATE_DELAY_EXPLICIT=false
 
 EXPECTED_HEADER="BillingAccountName,EnrollmentAccountName,SubscriptionName,SubscriptionId,ResourceGroupName,FoundryResourceName,DefaultProjectName,Location,ModelNames,ModelVersion,ModelFormat,DeploymentType,DeploymentCapacityK"
 
@@ -73,7 +74,8 @@ usage() {
 手工填入 CSV 的 SubscriptionId 列。运行阶段 1 时脚本会额外要求输入 EA 二次确认。
   --csv PATH         规划 CSV 路径，默认同目录 Azure_Foundry_AI_Plan.csv。
   --output-root PATH logs/results 输出根目录，默认脚本所在目录。
-  --create-delay N   阶段 1 中每创建一个订阅后的等待秒数，默认 10，用于缓解租户级限流。
+  --create-delay N   阶段 1 中每创建一个订阅后的等待秒数，用于缓解租户级限流。
+                     不指定时按待创建数量自动选择：<=20 个用 10 秒，21-50 个用 20 秒，>50 个用 30 秒。
   --dry-run          只显示将执行的动作，不创建或修改任何 Azure 资源。
   --browser-login    使用浏览器登录；默认使用设备码登录。
   --help             显示本帮助。
@@ -94,7 +96,7 @@ while (($#)); do
     --stage) STAGE="${2:-}"; shift 2 ;;
     --csv) CSV_PATH="${2:-}"; shift 2 ;;
     --output-root) OUTPUT_ROOT="${2:-}"; shift 2 ;;
-    --create-delay) CREATE_DELAY_SECONDS="${2:-10}"; shift 2 ;;
+    --create-delay) CREATE_DELAY_SECONDS="${2:-10}"; CREATE_DELAY_EXPLICIT=true; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
     --browser-login) BROWSER_LOGIN=true; shift ;;
     --help|-h) usage; exit 0 ;;
@@ -577,6 +579,18 @@ stage_create_subscription() {
   done < "$rows_file"
 
   if ((pending == 0)); then log_info '没有需要创建的订阅。'; return 0; fi
+
+  # 订阅越多，累计租户级写请求越容易触发限流，未显式指定时按批量规模自动取间隔。
+  if [[ "$CREATE_DELAY_EXPLICIT" == false ]]; then
+    if ((pending > 50)); then
+      CREATE_DELAY_SECONDS=30
+    elif ((pending > 20)); then
+      CREATE_DELAY_SECONDS=20
+    else
+      CREATE_DELAY_SECONDS=10
+    fi
+  fi
+  log_info "每创建一个订阅后等待 ${CREATE_DELAY_SECONDS} 秒，用于避免租户级限流。"
   confirm_execution "将创建 $pending 个 EA 订阅" || return 0
 
   write_result_header 'stage1_subscription_creation' SubscriptionName SubscriptionId AliasName Status ErrorMessage

@@ -122,13 +122,20 @@ Windows 上运行脚本必须带 `.\` 前缀，不能只写文件名。
 
 阶段 1 通过 `Microsoft.Subscription/aliases` 创建订阅，属于**租户级写操作**。Azure Resource Manager 对租户范围的写请求按令牌桶限流（桶容量 200，每秒补充 10），超出后返回 `429 Too Many Requests` 并带 `Retry-After`。一次性创建 20 个以上订阅时容易触发。
 
-脚本已内置以下缓解措施：
+脚本已内置以下缓解措施，**无需在命令中添加任何参数**：
 
 - 遇到 429 或限流类错误时自动按 `Retry-After` 退避重试，最多 6 次。
-- 每创建成功一个订阅后默认等待 10 秒再创建下一个。
+- 每创建成功一个订阅后自动等待再创建下一个，等待时间按本次待创建数量自动选择：
+
+  | 本次待创建订阅数 | 自动间隔 | 仅等待耗时（估算） |
+  |---|---|---|
+  | 1 - 20 | 10 秒 | 约 3 分钟以内 |
+  | 21 - 50 | 20 秒 | 约 7 到 17 分钟 |
+  | 51 及以上 | 30 秒 | 约 25 分钟起 |
+
 - 订阅创建状态轮询间隔为 15 秒，减少租户级读请求。
 
-如果仍然被限流，可以增大创建间隔：
+以 50 个订阅为例，脚本会自动使用 20 秒间隔；如果该环境仍然出现限流，再手动调到 30 秒即可：
 
 ```powershell
 .\Azure_Foundry_AI_Automation.ps1 -TenantId "<TENANT-ID>" -Stage CreateSubscription -CreateDelaySeconds 30
@@ -138,9 +145,11 @@ Windows 上运行脚本必须带 `.\` 前缀，不能只写文件名。
 bash Azure_Foundry_AI_Automation.sh --tenant-id "<TENANT-ID>" --stage CreateSubscription --create-delay 30
 ```
 
+上表的耗时只统计脚本主动等待的时间，不含订阅本身的创建和状态轮询时间，实际总时长会更长。
+
 其他建议：
 
-- 分批执行，例如每批 10 到 20 个订阅，已成功的行会自动回填 `SubscriptionId` 并在重跑时跳过。
+- 数量较多时建议分批执行，例如每批 20 个左右；已成功的行会自动回填 `SubscriptionId`，重跑时自动跳过，不会重复创建。
 - 每个 EA 注册账户最多可创建 5000 个订阅，已取消、已删除和已转移的订阅同样计入该上限。
 - 被限流失败的行会记录在 `results/stage1_subscription_creation_<时间戳>.csv` 中，修复后直接重跑阶段 1 即可。
 

@@ -28,6 +28,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$script:CreateDelayExplicit = $PSBoundParameters.ContainsKey('CreateDelaySeconds')
+
 $ExpectedColumns = @(
     'BillingAccountName',
     'EnrollmentAccountName',
@@ -82,7 +84,8 @@ if ($Help) {
 手工填入 CSV 的 SubscriptionId 列。运行阶段 1 时脚本会额外要求输入 EA 二次确认。
   -Csv PATH        规划 CSV 路径，默认同目录 Azure_Foundry_AI_Plan.csv。
   -OutputRoot PATH logs/results 输出根目录，默认脚本所在目录。
-  -CreateDelaySeconds N 阶段 1 中每创建一个订阅后的等待秒数，默认 10，用于缓解租户级限流。
+  -CreateDelaySeconds N 阶段 1 中每创建一个订阅后的等待秒数，用于缓解租户级限流。
+                        不指定时按待创建数量自动选择：<=20 个用 10 秒，21-50 个用 20 秒，>50 个用 30 秒。
   -DryRun          只显示将执行的动作，不创建或修改任何 Azure 资源。
   -BrowserLogin    使用浏览器登录；默认使用设备码登录。
   -Help            显示本帮助。
@@ -514,6 +517,15 @@ function Set-Deployment {
 
 # ==================== 阶段 1：创建 EA 订阅 ====================
 
+# 订阅越多，累计租户级写请求越容易触发限流，未显式指定时按批量规模自动取间隔。
+function Get-CreateDelaySeconds {
+    param([int]$PendingCount)
+    if ($script:CreateDelayExplicit) { return $CreateDelaySeconds }
+    if ($PendingCount -gt 50) { return 30 }
+    if ($PendingCount -gt 20) { return 20 }
+    10
+}
+
 function Test-FatalBillingError {
     param([string]$Message)
     $Message -match 'Permission|Forbidden|UserNotAuthorized|AuthorizationFailed|InvalidBillingScope|EnrollmentAccount'
@@ -551,6 +563,8 @@ function Invoke-StageCreateSubscription {
         }
     }
     if ($pending.Count -eq 0) { Write-Info '没有需要创建的订阅。'; return $true }
+    $delaySeconds = Get-CreateDelaySeconds -PendingCount $pending.Count
+    Write-Info "每创建一个订阅后等待 $delaySeconds 秒，用于避免租户级限流。"
     if (-not (Confirm-Execution "将创建 $($pending.Count) 个 EA 订阅")) { return $true }
 
     $results = New-Object System.Collections.Generic.List[object]
@@ -609,7 +623,7 @@ function Invoke-StageCreateSubscription {
         }
 
         # 批量创建时主动限速，避免触发租户级写限流。
-        if ($CreateDelaySeconds -gt 0) { Start-Sleep -Seconds $CreateDelaySeconds }
+        if ($delaySeconds -gt 0) { Start-Sleep -Seconds $delaySeconds }
     }
 
     Save-ResultCsv -Name 'stage1_subscription_creation' -Rows $results.ToArray()
