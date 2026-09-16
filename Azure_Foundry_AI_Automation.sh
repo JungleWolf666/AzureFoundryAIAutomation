@@ -24,6 +24,8 @@ fi
 
 set -euo pipefail
 
+SCRIPT_VERSION="1.0.0"
+
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 TENANT_ID=""
 CSV_PATH="$SCRIPT_DIR/Azure_Foundry_AI_Plan.csv"
@@ -78,6 +80,7 @@ usage() {
                      不指定时按待创建数量自动选择：<=20 个用 10 秒，21-50 个用 20 秒，>50 个用 30 秒。
   --dry-run          只显示将执行的动作，不创建或修改任何 Azure 资源。
   --browser-login    使用浏览器登录；默认使用设备码登录。
+  --version          显示脚本版本。
   --help             显示本帮助。
 
 ModelNames 支持分号分隔，每项可写 name、name:version、name:version:format 或 name:version:format:sku，
@@ -99,6 +102,7 @@ while (($#)); do
     --create-delay) CREATE_DELAY_SECONDS="${2:-10}"; CREATE_DELAY_EXPLICIT=true; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
     --browser-login) BROWSER_LOGIN=true; shift ;;
+    --version) printf 'Azure Foundry AI Automation v%s\n' "$SCRIPT_VERSION"; exit 0 ;;
     --help|-h) usage; exit 0 ;;
     *) echo "未知参数：$1" >&2; usage >&2; exit 2 ;;
   esac

@@ -1,5 +1,7 @@
 # Azure Foundry AI Automation
 
+当前版本：`v1.0.0` · [更新记录](CHANGELOG.md)
+
 用于 Azure Foundry AI 生命周期自动化的 Bash 和 PowerShell 脚本集合，支持订阅准备、Foundry 资源创建、按剩余配额批量部署模型，以及将已有部署扩容至可用配额上限。
 
 这是一个公开的 GitHub 仓库。请在本地填写 CSV 配置，切勿将真实租户、订阅或计费信息提交回仓库。
@@ -37,6 +39,7 @@ AzureFoundryAIAutomation/
 ├── Azure_Foundry_AI_Automation.ps1   # PowerShell 版本
 ├── Azure_Foundry_AI_Automation.sh    # Bash 版本
 ├── Azure_Foundry_AI_Plan.csv          # 脱敏配置模板
+├── CHANGELOG.md                       # 版本更新记录
 └── README.md                          # 使用说明
 ```
 
@@ -61,6 +64,16 @@ cd AzureFoundryAIAutomation
 2. 按照下方字段说明替换所有占位值，例如 `BILLING-ACCOUNT-ID`、`SUBSCRIPTION-DEMO` 和 `demo-*` 资源名称。
 3. 确认 Azure CLI 已登录并具备对应阶段的权限。
 4. 先使用预演模式验证配置，再执行正式命令。
+
+查看版本：
+
+```powershell
+.\Azure_Foundry_AI_Automation.ps1 -Version
+```
+
+```bash
+bash Azure_Foundry_AI_Automation.sh --version
+```
 
 ## 运行前提
 

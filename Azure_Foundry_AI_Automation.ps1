@@ -22,8 +22,11 @@ param(
     [int]$CreateDelaySeconds = 10,
     [switch]$DryRun,
     [switch]$BrowserLogin,
+    [switch]$Version,
     [switch]$Help
 )
+
+$ScriptVersion = '1.0.0'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -103,6 +106,11 @@ ModelNames 支持分号分隔，每项可写 name、name:version、name:version:
 同一个订阅/账户可在 CSV 中写多行（如分别配置 GlobalStandard 和 DataZoneStandard）。
 DeploymentCapacityK 留空表示自动使用剩余配额；填数字表示固定容量（单位 K TPM）。
 "@ | Write-Host
+    exit 0
+}
+
+if ($Version) {
+    Write-Output "Azure Foundry AI Automation v$ScriptVersion"
     exit 0
 }
 
