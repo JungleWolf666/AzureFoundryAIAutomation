@@ -93,11 +93,56 @@ python3 --version
 - 部署模型：目标订阅切换/读取权限、Foundry 账户读取权限、`Microsoft.CognitiveServices/locations/usages/read` 和 `accounts/deployments/read`、`accounts/deployments/write`。
 - 扩容配额：与部署模型相同的读取/写入权限，以及 `Microsoft.CognitiveServices/locations/usages/read`；阶段 4 会先读取已有部署和共享配额，再更新部署容量。
 
-Windows 上脚本必须以 `.\` 开头运行。若脚本来自压缩包或网页下载，先解除阻止：
+## Windows 首次运行（执行策略）
+
+Windows 默认禁止运行未签名脚本，直接双击或运行会报 `UnauthorizedAccess` / `无法加载文件`。推荐使用下面任意一种方式。
+
+方式一：单条命令运行，不修改系统执行策略（推荐）。
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\Azure_Foundry_AI_Automation.ps1 -TenantId "<TENANT-ID>"
+```
+
+方式二：只对当前窗口放开执行策略，关闭窗口后自动失效。
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\Azure_Foundry_AI_Automation.ps1 -TenantId "<TENANT-ID>"
+```
+
+如果脚本来自压缩包或网页下载，还需要先解除文件阻止：
 
 ```powershell
 Unblock-File .\Azure_Foundry_AI_Automation.ps1
 ```
+
+Windows 上运行脚本必须带 `.\` 前缀，不能只写文件名。
+
+## 批量创建订阅的限流说明
+
+阶段 1 通过 `Microsoft.Subscription/aliases` 创建订阅，属于**租户级写操作**。Azure Resource Manager 对租户范围的写请求按令牌桶限流（桶容量 200，每秒补充 10），超出后返回 `429 Too Many Requests` 并带 `Retry-After`。一次性创建 20 个以上订阅时容易触发。
+
+脚本已内置以下缓解措施：
+
+- 遇到 429 或限流类错误时自动按 `Retry-After` 退避重试，最多 6 次。
+- 每创建成功一个订阅后默认等待 10 秒再创建下一个。
+- 订阅创建状态轮询间隔为 15 秒，减少租户级读请求。
+
+如果仍然被限流，可以增大创建间隔：
+
+```powershell
+.\Azure_Foundry_AI_Automation.ps1 -TenantId "<TENANT-ID>" -Stage CreateSubscription -CreateDelaySeconds 30
+```
+
+```bash
+bash Azure_Foundry_AI_Automation.sh --tenant-id "<TENANT-ID>" --stage CreateSubscription --create-delay 30
+```
+
+其他建议：
+
+- 分批执行，例如每批 10 到 20 个订阅，已成功的行会自动回填 `SubscriptionId` 并在重跑时跳过。
+- 每个 EA 注册账户最多可创建 5000 个订阅，已取消、已删除和已转移的订阅同样计入该上限。
+- 被限流失败的行会记录在 `results/stage1_subscription_creation_<时间戳>.csv` 中，修复后直接重跑阶段 1 即可。
 
 ## EA 计费账户信息从哪里查找
 

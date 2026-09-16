@@ -19,6 +19,7 @@ param(
     [string]$Stage,
     [string]$Csv = (Join-Path $PSScriptRoot 'Azure_Foundry_AI_Plan.csv'),
     [string]$OutputRoot = $PSScriptRoot,
+    [int]$CreateDelaySeconds = 10,
     [switch]$DryRun,
     [switch]$BrowserLogin,
     [switch]$Help
@@ -81,6 +82,7 @@ if ($Help) {
 手工填入 CSV 的 SubscriptionId 列。运行阶段 1 时脚本会额外要求输入 EA 二次确认。
   -Csv PATH        规划 CSV 路径，默认同目录 Azure_Foundry_AI_Plan.csv。
   -OutputRoot PATH logs/results 输出根目录，默认脚本所在目录。
+  -CreateDelaySeconds N 阶段 1 中每创建一个订阅后的等待秒数，默认 10，用于缓解租户级限流。
   -DryRun          只显示将执行的动作，不创建或修改任何 Azure 资源。
   -BrowserLogin    使用浏览器登录；默认使用设备码登录。
   -Help            显示本帮助。
@@ -162,6 +164,33 @@ function Invoke-AzRest {
     Invoke-AzRaw -Arguments $arguments -AllowFailure
 }
 
+function Test-ThrottledError {
+    param([string]$Message)
+    $Message -match '(?i)(^|[^0-9])429([^0-9]|$)|TooManyRequests|Too many requests|RateLimitExceeded|throttl|excessive volume of traffic'
+}
+
+function Get-RetryAfterSeconds {
+    param([string]$Message, [int]$Attempt)
+    if ($Message -match '(?i)retry[-\s]?after[^0-9]{0,12}(\d+)') {
+        $advertised = [int]$Matches[1]
+        if ($advertised -gt 0) { return [math]::Min($advertised, 300) }
+    }
+    [math]::Min([int][math]::Pow(2, $Attempt) * 5, 120)
+}
+
+# 订阅别名创建是租户级写操作，Azure 按租户令牌桶限流，429 需按 Retry-After 退避重试。
+function Invoke-AzRestWithRetry {
+    param([string]$Method, [string]$Url, [string]$BodyPath = '', [int]$MaxAttempts = 6)
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        $result = Invoke-AzRest -Method $Method -Url $Url -BodyPath $BodyPath
+        if ($result.ExitCode -eq 0) { return $result }
+        if ($attempt -ge $MaxAttempts -or -not (Test-ThrottledError -Message $result.Text)) { return $result }
+        $wait = Get-RetryAfterSeconds -Message $result.Text -Attempt $attempt
+        Write-Warn "  请求被限流（第 $attempt/$MaxAttempts 次），等待 $wait 秒后重试。"
+        Start-Sleep -Seconds $wait
+    }
+}
+
 function Confirm-Environment {
     if (-not (Get-Command az -ErrorAction SilentlyContinue)) { throw '未找到 Azure CLI，请先安装 az 并重新打开终端。' }
     if ([string]::IsNullOrWhiteSpace($TenantId)) { throw '-TenantId 为必填参数。' }
@@ -185,7 +214,10 @@ function Import-Plan {
 
     if (-not (Test-Path -LiteralPath $Csv -PathType Leaf)) { throw "CSV 文件不存在：$Csv" }
     $headerLine = Get-Content -LiteralPath $Csv -TotalCount 1
-    if (($headerLine -split ',') -join ',' -ne ($ExpectedColumns -join ',')) {
+    $headerLine = [string]$headerLine -replace "^\uFEFF", ''
+    # Excel 和 Export-Csv 会给表头加引号，比对前先去掉引号和空白。
+    $headerColumns = @(($headerLine -split ',') | ForEach-Object { $_.Trim().Trim('"').Trim() })
+    if (($headerColumns -join ',') -ne ($ExpectedColumns -join ',')) {
         throw "CSV 列必须严格为：$($ExpectedColumns -join ',')"
     }
 
@@ -313,6 +345,24 @@ function Get-DeploymentType {
     $value
 }
 
+function ConvertTo-CsvField {
+    param([string]$Value)
+    if ($Value -match '[",\r\n]') { return '"' + $Value.Replace('"', '""') + '"' }
+    $Value
+}
+
+# Export-Csv 会给每个字段都加引号，回写后表头变成 "BillingAccountName",... 导致后续阶段校验失败，这里只在必要时加引号。
+function Write-PlanCsv {
+    param([object[]]$Rows)
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add(($ExpectedColumns -join ','))
+    foreach ($row in $Rows) {
+        $fields = foreach ($column in $ExpectedColumns) { ConvertTo-CsvField -Value ([string]$row.$column) }
+        $lines.Add(($fields -join ','))
+    }
+    Set-Content -LiteralPath $Csv -Value $lines.ToArray() -Encoding UTF8
+}
+
 function Save-ResultCsv {
     param([string]$Name, [object[]]$Rows)
     if ($Rows.Count -eq 0) { return }
@@ -328,7 +378,7 @@ function Update-PlanSubscriptionId {
     foreach ($row in $Rows) {
         if ($row.SubscriptionName -eq $SubscriptionName) { $row.SubscriptionId = $SubscriptionId }
     }
-    $Rows | Export-Csv -LiteralPath $Csv -NoTypeInformation -Encoding UTF8
+    Write-PlanCsv -Rows $Rows
 }
 
 function Confirm-Execution {
@@ -473,14 +523,14 @@ function Wait-AliasProvisioning {
     param([string]$Url, [string]$SubscriptionName)
     $started = Get-Date
     while ($true) {
-        $result = Invoke-AzRest -Method 'GET' -Url $Url
+        $result = Invoke-AzRestWithRetry -Method 'GET' -Url $Url
         if ($result.ExitCode -ne 0) { throw $result.Text }
         $object = $result.Text | ConvertFrom-Json
         $state = [string](Get-Prop $object 'properties.provisioningState')
         if ($state -eq 'Succeeded') { return $object }
         if ($state -in @('Failed', 'Canceled', 'Deleted')) { throw "订阅 '$SubscriptionName' 进入终止状态 $state" }
         if (((Get-Date) - $started).TotalSeconds -ge 900) { throw "订阅 '$SubscriptionName' 创建超时，最后状态为 $state" }
-        Start-Sleep -Seconds 5
+        Start-Sleep -Seconds 15
     }
 }
 
@@ -532,7 +582,7 @@ function Invoke-StageCreateSubscription {
 
         try {
             Write-Info "创建订阅 '$($row.SubscriptionName)'（billingAccount=$($row.BillingAccountName)，enrollmentAccount=$($row.EnrollmentAccountName)）"
-            $created = Invoke-AzRest -Method 'PUT' -Url $aliasUrl -BodyPath $bodyPath
+            $created = Invoke-AzRestWithRetry -Method 'PUT' -Url $aliasUrl -BodyPath $bodyPath
             if ($created.ExitCode -ne 0) { throw $created.Text }
             $response = $created.Text | ConvertFrom-Json
             if ([string](Get-Prop $response 'properties.provisioningState') -ne 'Succeeded') {
@@ -557,6 +607,9 @@ function Invoke-StageCreateSubscription {
         finally {
             Remove-Item -LiteralPath $bodyPath -Force -ErrorAction SilentlyContinue
         }
+
+        # 批量创建时主动限速，避免触发租户级写限流。
+        if ($CreateDelaySeconds -gt 0) { Start-Sleep -Seconds $CreateDelaySeconds }
     }
 
     Save-ResultCsv -Name 'stage1_subscription_creation' -Rows $results.ToArray()
@@ -569,7 +622,7 @@ function Wait-ArmProvisioning {
     param([string]$Description, [string]$Url)
     $started = Get-Date
     while ($true) {
-        $result = Invoke-AzRest -Method 'GET' -Url $Url
+        $result = Invoke-AzRestWithRetry -Method 'GET' -Url $Url
         if ($result.ExitCode -ne 0) { throw $result.Text }
         $state = [string](Get-Prop ($result.Text | ConvertFrom-Json) 'properties.provisioningState')
         if ($state -eq 'Succeeded') { Write-Info "$Description 已就绪"; return }

@@ -31,6 +31,7 @@ OUTPUT_ROOT="$SCRIPT_DIR"
 STAGE=""
 DRY_RUN=false
 BROWSER_LOGIN=false
+CREATE_DELAY_SECONDS=10
 
 EXPECTED_HEADER="BillingAccountName,EnrollmentAccountName,SubscriptionName,SubscriptionId,ResourceGroupName,FoundryResourceName,DefaultProjectName,Location,ModelNames,ModelVersion,ModelFormat,DeploymentType,DeploymentCapacityK"
 
@@ -72,6 +73,7 @@ usage() {
 手工填入 CSV 的 SubscriptionId 列。运行阶段 1 时脚本会额外要求输入 EA 二次确认。
   --csv PATH         规划 CSV 路径，默认同目录 Azure_Foundry_AI_Plan.csv。
   --output-root PATH logs/results 输出根目录，默认脚本所在目录。
+  --create-delay N   阶段 1 中每创建一个订阅后的等待秒数，默认 10，用于缓解租户级限流。
   --dry-run          只显示将执行的动作，不创建或修改任何 Azure 资源。
   --browser-login    使用浏览器登录；默认使用设备码登录。
   --help             显示本帮助。
@@ -92,6 +94,7 @@ while (($#)); do
     --stage) STAGE="${2:-}"; shift 2 ;;
     --csv) CSV_PATH="${2:-}"; shift 2 ;;
     --output-root) OUTPUT_ROOT="${2:-}"; shift 2 ;;
+    --create-delay) CREATE_DELAY_SECONDS="${2:-10}"; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
     --browser-login) BROWSER_LOGIN=true; shift ;;
     --help|-h) usage; exit 0 ;;
@@ -156,6 +159,49 @@ az_rest() {
   [[ -n "$body_file" ]] && args+=(--body "@$body_file")
   args+=(--output json --only-show-errors)
   az "${args[@]}"
+}
+
+is_throttled_error() {
+  printf '%s' "$1" | grep -Eqi '(^|[^0-9])429([^0-9]|$)|TooManyRequests|Too many requests|RateLimitExceeded|throttl|excessive volume of traffic'
+}
+
+retry_after_seconds() {
+  local message="$1" attempt="$2" seconds=""
+  seconds=$(printf '%s' "$message" | grep -Eoi 'retry[-_ ]?after[^0-9]{0,12}[0-9]+' | grep -Eo '[0-9]+' | head -n 1)
+  if [[ -n "$seconds" ]] && ((seconds > 0)); then
+    ((seconds > 300)) && seconds=300
+    printf '%s' "$seconds"
+    return 0
+  fi
+  seconds=$((5 * (1 << attempt)))
+  ((seconds > 120)) && seconds=120
+  printf '%s' "$seconds"
+}
+
+# 订阅别名创建是租户级写操作，Azure 按租户令牌桶限流，429 需按 Retry-After 退避重试。
+# 命令替换会开子 shell，错误信息改用文件回传给调用方。
+AZ_REST_ERROR_FILE=""
+az_rest_retry() {
+  local method="$1" url="$2" body_file="${3:-}"
+  local attempt=1 max_attempts=6 output="" message="" wait_seconds=""
+  local err_file="$TEMP_DIR/az_rest_attempt.err"
+  AZ_REST_ERROR_FILE="$TEMP_DIR/az_rest_last.err"
+  : > "$AZ_REST_ERROR_FILE"
+  while :; do
+    if output=$(az_rest "$method" "$url" "$body_file" 2>"$err_file"); then
+      printf '%s' "$output"
+      return 0
+    fi
+    message=$(tr '\n' ' ' < "$err_file")
+    if ((attempt >= max_attempts)) || ! is_throttled_error "$message"; then
+      printf '%s' "$message" > "$AZ_REST_ERROR_FILE"
+      return 1
+    fi
+    wait_seconds=$(retry_after_seconds "$message" "$attempt")
+    log_warn "  请求被限流（第 ${attempt}/${max_attempts} 次），等待 ${wait_seconds} 秒后重试。"
+    sleep "$wait_seconds"
+    attempt=$((attempt + 1))
+  done
 }
 
 azure_login() {
@@ -593,8 +639,8 @@ stage_create_subscription() {
 
     log_info "创建订阅 '$name'（billingAccount=${billing}，enrollmentAccount=${enrollment}）"
     local response=""
-    if ! response=$(az_rest PUT "$alias_url" "$body_file" 2>"$error_file"); then
-      local message; message=$(tr '\n' ' ' < "$error_file")
+    if ! response=$(az_rest_retry PUT "$alias_url" "$body_file"); then
+      local message; message=$(tr '\n' ' ' < "$AZ_REST_ERROR_FILE")
       log_error "$name: $message"
       write_result_row "$name" "" "$alias_name" "Failed" "$message"
       ok=1
@@ -615,8 +661,8 @@ stage_create_subscription() {
         ok=1
         break
       fi
-      sleep 5
-      response=$(az_rest GET "$alias_url")
+      sleep 15
+      response=$(az_rest_retry GET "$alias_url")
       state=$(printf '%s' "$response" | jq -r '.properties.provisioningState // ""')
     done
     [[ "$state" != "Succeeded" ]] && continue
@@ -634,6 +680,9 @@ stage_create_subscription() {
     created_sub_ids_vals+=("$new_id")
     log_info "订阅 '$name' 创建完成，ID=$new_id"
     write_result_row "$name" "$new_id" "$alias_name" "Succeeded" ""
+
+    # 批量创建时主动限速，避免触发租户级写限流。
+    ((CREATE_DELAY_SECONDS > 0)) && sleep "$CREATE_DELAY_SECONDS"
   done < "$rows_file"
 
   log_info "结果文件：$RESULT_FILE"
@@ -677,7 +726,7 @@ wait_arm_provisioning() {
   local description="$1" url="$2" started state
   started=$(date +%s)
   while true; do
-    state=$(az_rest GET "$url" | jq -r '.properties.provisioningState // ""')
+    state=$(az_rest_retry GET "$url" | jq -r '.properties.provisioningState // ""')
     if [[ "$state" == "Succeeded" ]]; then log_info "$description 已就绪"; return 0; fi
     case "$state" in Failed|Canceled|Deleted) echo "$description 进入终止状态 $state" >&2; return 1 ;; esac
     if (($(date +%s) - started >= 900)); then echo "$description 超时，最后状态为 $state" >&2; return 1; fi
