@@ -26,7 +26,7 @@ param(
     [switch]$Help
 )
 
-$ScriptVersion = '1.0.1'
+$ScriptVersion = '1.0.2'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -527,6 +527,91 @@ function Set-Deployment {
     if ($result.ExitCode -ne 0) { throw $result.Text }
 }
 
+# ==================== 交付清单 ====================
+
+# 三个端点共用账户级 key1，主机名由自定义子域决定。
+function Get-AccountEndpoints {
+    param([object]$Row)
+    $account = Invoke-AzJson -Arguments @('cognitiveservices', 'account', 'show', '--resource-group', [string]$Row.ResourceGroupName, '--name', [string]$Row.FoundryResourceName)
+    $subDomain = [string](Get-Prop $account 'properties.customSubDomainName')
+    if ([string]::IsNullOrWhiteSpace($subDomain)) { $subDomain = [string]$Row.FoundryResourceName }
+    [pscustomobject]@{
+        OpenAIEndpoint   = "https://$subDomain.openai.azure.com/"
+        ProjectEndpoint  = "https://$subDomain.services.ai.azure.com/api/projects/$([string]$Row.DefaultProjectName)"
+        ServicesEndpoint = "https://$subDomain.cognitiveservices.azure.com/"
+    }
+}
+
+function Get-AccountApiKey {
+    param([object]$Row)
+    $result = Invoke-AzRaw -Arguments @('cognitiveservices', 'account', 'keys', 'list', '--resource-group', [string]$Row.ResourceGroupName, '--name', [string]$Row.FoundryResourceName, '--query', 'key1', '-o', 'tsv', '--only-show-errors') -AllowFailure
+    if ($result.ExitCode -ne 0) {
+        Write-Warn "  无法读取 $($Row.FoundryResourceName) 的 API Key，需要 Microsoft.CognitiveServices/accounts/listKeys/action 权限，该列留空。"
+        return ''
+    }
+    $result.Text.Trim()
+}
+
+function Confirm-IncludeApiKey {
+    Write-Host ''
+    Write-Host 'API Key 是明文长期凭据，一旦泄露即可直接调用该 Foundry 资源。'
+    Write-Host '默认不导出。仅在需要交付给项目负责人时才导出，并通过安全渠道传递。'
+    $answer = Read-Host '是否在交付清单中包含 API Key？输入大写 KEY 表示包含，其他任意输入表示不包含'
+    $answer -ceq 'KEY'
+}
+
+# 按 订阅 + Foundry 账户 + 项目 去重，每个项目输出一行。
+function Save-DeliveryReport {
+    param([object[]]$Rows, [object[]]$Accounts)
+    if ($Rows.Count -eq 0) { return }
+    if ($DryRun) { Write-Info '预演模式不生成交付清单。'; return }
+
+    $includeKey = Confirm-IncludeApiKey
+    if ($includeKey) { Write-Info '交付清单将包含 API Key。' } else { Write-Info '交付清单不包含 API Key。' }
+
+    $report = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+    foreach ($row in $Rows) {
+        $projectKey = '{0}|{1}|{2}|{3}' -f ([string]$row.SubscriptionId).ToLowerInvariant(), ([string]$row.ResourceGroupName).ToLowerInvariant(), ([string]$row.FoundryResourceName).ToLowerInvariant(), ([string]$row.DefaultProjectName).ToLowerInvariant()
+        if ($seen.ContainsKey($projectKey)) { continue }
+        $seen[$projectKey] = $true
+        try {
+            Resolve-Subscription -Row $row -Accounts $Accounts | Out-Null
+            $endpoints = Get-AccountEndpoints -Row $row
+            $deployments = @(Get-ExistingDeployments -Row $row)
+            $modelText = (@($deployments | ForEach-Object { '{0}({1}, {2}, {3}K)' -f $_.DeploymentName, $_.ModelName, $_.SkuName, $_.CapacityK }) -join '; ')
+            $apiKey = if ($includeKey) { Get-AccountApiKey -Row $row } else { '' }
+            $report.Add([pscustomobject]@{
+                    SubscriptionName    = $row.SubscriptionName
+                    SubscriptionId      = $row.SubscriptionId
+                    ResourceGroupName   = $row.ResourceGroupName
+                    FoundryResourceName = $row.FoundryResourceName
+                    ProjectName         = $row.DefaultProjectName
+                    Location            = $row.Location
+                    DeploymentCount     = $deployments.Count
+                    DeployedModels      = $modelText
+                    OpenAIEndpoint      = $endpoints.OpenAIEndpoint
+                    ProjectEndpoint     = $endpoints.ProjectEndpoint
+                    ServicesEndpoint    = $endpoints.ServicesEndpoint
+                    ApiKey              = $apiKey
+                })
+        }
+        catch {
+            Write-Err "生成交付清单失败（$($row.FoundryResourceName)）：$($_.Exception.Message)"
+        }
+    }
+
+    if ($report.Count -eq 0) { Write-Warn '没有可写入交付清单的项目。'; return }
+
+    $deliveryDir = Join-Path $OutputRoot 'delivery_reports'
+    New-Item -ItemType Directory -Path $deliveryDir -Force | Out-Null
+    $suffix = if ($includeKey) { '_WITH_KEY' } else { '' }
+    $path = Join-Path $deliveryDir ("foundry_endpoints_{0}{1}.csv" -f $script:RunId, $suffix)
+    $report.ToArray() | Export-Csv -LiteralPath $path -NoTypeInformation -Encoding UTF8
+    Write-Info "交付清单：$path"
+    if ($includeKey) { Write-Warn '该文件包含明文 API Key，请通过安全渠道传递，交付后及时删除本地副本。' }
+}
+
 # ==================== 阶段 1：创建 EA 订阅 ====================
 
 # 订阅越多，累计租户级写请求越容易触发限流，未显式指定时按批量规模自动取间隔。
@@ -895,6 +980,7 @@ function Invoke-StageDeployModels {
     }
 
     Save-ResultCsv -Name 'stage3_model_deployment' -Rows $results.ToArray()
+    Save-DeliveryReport -Rows $rows -Accounts $accounts
     $ok
 }
 

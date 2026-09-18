@@ -1,4 +1,6 @@
 csv_backups/
 logs/
 results/
+delivery_reports/
+script_backups/
 *.bak.*

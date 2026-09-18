@@ -1,10 +1,10 @@
 # Azure Foundry AI Automation
 
-当前版本：`v1.0.1` · [更新记录](CHANGELOG.md)
+当前版本：`v1.0.2` · [更新记录](CHANGELOG.md)
 
 用于 Azure Foundry AI 生命周期自动化的 Bash 和 PowerShell 脚本集合，支持订阅准备、Foundry 资源创建、按剩余配额批量部署模型，以及将已有部署扩容至可用配额上限。
 
-这是一个公开的 GitHub 仓库。请在本地填写 CSV 配置，切勿将真实租户、订阅或计费信息提交回仓库。
+请在本地填写 CSV 配置。CSV、日志和交付清单可能包含订阅、计费和凭据信息，请勿提交到任何公开仓库，也不要通过不安全的渠道传递。
 
 把原来四个独立脚本合并为一个，所有参数集中在同一个 CSV 中维护：
 
@@ -400,6 +400,42 @@ bash Azure_Foundry_AI_Automation.sh --tenant-id "<TENANT-ID>" --stage All
 - 未注册 `Microsoft.CognitiveServices` 时自动注册并记录到日志
 - 阶段 1 仅调用订阅别名创建 API；CSP 订阅不会因为运行阶段 1 而获得创建权限
 
+## 交付清单（阶段 3 自动生成）
+
+阶段 3 正式执行完成后，脚本会读取 Azure 上的实际状态，生成一份可直接交付给项目负责人的清单，输出到 `delivery_reports/`。
+
+清单**每个项目一行**，包含订阅、项目、三个 Endpoint 和该项目下所有已部署模型：
+
+| 列 | 说明 |
+|---|---|
+| `SubscriptionName` / `SubscriptionId` | 所属订阅 |
+| `ResourceGroupName` / `FoundryResourceName` / `ProjectName` / `Location` | 资源定位信息 |
+| `DeploymentCount` | 该项目下的部署数量 |
+| `DeployedModels` | 全部部署，格式为 `部署名(模型名, SKU, 容量K)`，多个用 `;` 分隔 |
+| `OpenAIEndpoint` | `https://<子域>.openai.azure.com/`，接入 AI 网关和 OpenAI SDK 常用 |
+| `ProjectEndpoint` | `https://<子域>.services.ai.azure.com/api/projects/<项目名>`，Foundry SDK 和 Agent 使用 |
+| `ServicesEndpoint` | `https://<子域>.cognitiveservices.azure.com/`，Foundry Tools 使用 |
+| `ApiKey` | 默认留空，仅在运行时选择包含后才填充 |
+
+三个 Endpoint 共用同一个账户级 API Key，因此清单中只输出一列 `ApiKey`。
+
+### API Key 的导出是交互式的
+
+阶段 3 结束时会询问是否在清单中包含 API Key，**默认不包含**：
+
+```text
+API Key 是明文长期凭据，一旦泄露即可直接调用该 Foundry 资源。
+默认不导出。仅在需要交付给项目负责人时才导出，并通过安全渠道传递。
+是否在交付清单中包含 API Key？输入大写 KEY 表示包含，其他任意输入表示不包含：
+```
+
+- 输入大写 `KEY`：包含 API Key，文件名带 `_WITH_KEY` 后缀，Bash 版会将文件权限设为 `600`。
+- 输入其他任意内容：`ApiKey` 列留空。
+- 预演模式不会生成交付清单。
+- 若账号缺少 `Microsoft.CognitiveServices/accounts/listKeys/action` 权限，该列留空并继续，不会中断。
+
+> ⚠️ 带 `_WITH_KEY` 的文件包含明文凭据，等同于该 Foundry 资源的访问权限。请通过安全渠道传递给客户，要求客户妥善保管，并在交付完成后删除本地副本。该目录已加入 `.gitignore`，不会被提交到仓库。
+
 ## 输出
 
 ```text
@@ -408,6 +444,8 @@ results/stage1_subscription_creation_<时间戳>.csv
 results/stage2_foundry_provisioning_<时间戳>.csv
 results/stage3_model_deployment_<时间戳>.csv
 results/stage4_quota_scale_up_<时间戳>.csv
+delivery_reports/foundry_endpoints_<时间戳>.csv
+delivery_reports/foundry_endpoints_<时间戳>_WITH_KEY.csv
 ```
 
 ## 常见问题

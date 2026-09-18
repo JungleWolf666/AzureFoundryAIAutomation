@@ -24,7 +24,7 @@ fi
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.0.1"
+SCRIPT_VERSION="1.0.2"
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 TENANT_ID=""
@@ -554,6 +554,140 @@ set_deployment() {
   az "${args[@]}" --output none
 }
 
+# ==================== 交付清单 ====================
+
+# 三个端点共用账户级 key1，主机名由自定义子域决定。
+get_account_endpoints() {
+  local row_json="$1" sub_domain project
+  project=$(csv_field "$row_json" 'DefaultProjectName')
+  sub_domain=$(az_json cognitiveservices account show \
+    --resource-group "$(csv_field "$row_json" 'ResourceGroupName')" \
+    --name "$(csv_field "$row_json" 'FoundryResourceName')" 2>/dev/null |
+    jq -r '.properties.customSubDomainName // ""')
+  [[ -z "$sub_domain" ]] && sub_domain=$(csv_field "$row_json" 'FoundryResourceName')
+  printf '%s\t%s\t%s' \
+    "https://${sub_domain}.openai.azure.com/" \
+    "https://${sub_domain}.services.ai.azure.com/api/projects/${project}" \
+    "https://${sub_domain}.cognitiveservices.azure.com/"
+}
+
+get_account_api_key() {
+  local row_json="$1" key=""
+  if ! key=$(az cognitiveservices account keys list \
+    --resource-group "$(csv_field "$row_json" 'ResourceGroupName')" \
+    --name "$(csv_field "$row_json" 'FoundryResourceName')" \
+    --query key1 -o tsv --only-show-errors 2>/dev/null); then
+    log_warn "  无法读取 $(csv_field "$row_json" 'FoundryResourceName') 的 API Key，需要 Microsoft.CognitiveServices/accounts/listKeys/action 权限，该列留空。"
+    printf ''
+    return 0
+  fi
+  printf '%s' "$key"
+}
+
+confirm_include_api_key() {
+  cat >&2 <<'EOF'
+
+API Key 是明文长期凭据，一旦泄露即可直接调用该 Foundry 资源。
+默认不导出。仅在需要交付给项目负责人时才导出，并通过安全渠道传递。
+
+EOF
+  printf '是否在交付清单中包含 API Key？输入大写 KEY 表示包含，其他任意输入表示不包含：' >&2
+  local answer
+  IFS= read -r answer
+  [[ "$answer" == "KEY" ]]
+}
+
+# 按 订阅 + Foundry 账户 + 项目 去重，每个项目输出一行。
+save_delivery_report() {
+  local rows_file="$1"
+  [[ "$DRY_RUN" == true ]] && { log_info '预演模式不生成交付清单。'; return 0; }
+
+  local include_key=false
+  confirm_include_api_key && include_key=true
+  if [[ "$include_key" == true ]]; then
+    log_info '交付清单将包含 API Key。'
+  else
+    log_info '交付清单不包含 API Key。'
+  fi
+
+  local delivery_dir="$OUTPUT_ROOT/delivery_reports"
+  mkdir -p "$delivery_dir"
+  local suffix=""
+  [[ "$include_key" == true ]] && suffix="_WITH_KEY"
+  local report_file="$delivery_dir/foundry_endpoints_${RUN_ID}${suffix}.csv"
+  local rows_tsv="$TEMP_DIR/delivery_rows.tsv"
+  : > "$rows_tsv"
+
+  local seen_keys=() row_json project_key i found
+  while IFS= read -r row_json; do
+    project_key="$(csv_field "$row_json" 'SubscriptionId')|$(csv_field "$row_json" 'ResourceGroupName')|$(csv_field "$row_json" 'FoundryResourceName')|$(csv_field "$row_json" 'DefaultProjectName')"
+    found=false
+    for ((i = 0; i < ${#seen_keys[@]}; i++)); do
+      [[ "${seen_keys[$i]}" == "$project_key" ]] && { found=true; break; }
+    done
+    [[ "$found" == true ]] && continue
+    seen_keys+=("$project_key")
+
+    if ! resolve_subscription "$row_json" >/dev/null 2>&1; then
+      log_error "生成交付清单失败（$(csv_field "$row_json" 'FoundryResourceName')）：无法切换订阅。"
+      continue
+    fi
+
+    local endpoints openai_ep project_ep services_ep models count api_key
+    endpoints=$(get_account_endpoints "$row_json")
+    IFS=$'\t' read -r openai_ep project_ep services_ep <<< "$endpoints"
+
+    models=""
+    count=0
+    local ex_name ex_model ex_fmt ex_ver ex_sku ex_cap
+    while IFS=$'\t' read -r ex_name ex_model ex_fmt ex_ver ex_sku ex_cap; do
+      [[ -z "$ex_name" ]] && continue
+      count=$((count + 1))
+      models="${models}${models:+; }${ex_name}(${ex_model}, ${ex_sku}, ${ex_cap}K)"
+    done < <(get_existing_deployments "$row_json" 2>/dev/null || true)
+
+    api_key=""
+    [[ "$include_key" == true ]] && api_key=$(get_account_api_key "$row_json")
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$(csv_field "$row_json" 'SubscriptionName')" \
+      "$(csv_field "$row_json" 'SubscriptionId')" \
+      "$(csv_field "$row_json" 'ResourceGroupName')" \
+      "$(csv_field "$row_json" 'FoundryResourceName')" \
+      "$(csv_field "$row_json" 'DefaultProjectName')" \
+      "$(csv_field "$row_json" 'Location')" \
+      "$count" "$models" "$openai_ep" "$project_ep" "$services_ep" "$api_key" >> "$rows_tsv"
+  done < "$rows_file"
+
+  if [[ ! -s "$rows_tsv" ]]; then
+    log_warn '没有可写入交付清单的项目。'
+    return 0
+  fi
+
+  python3 - "$rows_tsv" "$report_file" <<'PY'
+import csv, sys
+
+source, target = sys.argv[1], sys.argv[2]
+headers = ['SubscriptionName', 'SubscriptionId', 'ResourceGroupName', 'FoundryResourceName',
+           'ProjectName', 'Location', 'DeploymentCount', 'DeployedModels',
+           'OpenAIEndpoint', 'ProjectEndpoint', 'ServicesEndpoint', 'ApiKey']
+with open(source, encoding='utf-8', newline='') as handle:
+    rows = [line.rstrip('\n').split('\t') for line in handle if line.strip()]
+with open(target, 'w', encoding='utf-8', newline='') as handle:
+    writer = csv.writer(handle, quoting=csv.QUOTE_ALL)
+    writer.writerow(headers)
+    for row in rows:
+        row = (row + [''] * len(headers))[:len(headers)]
+        writer.writerow(row)
+PY
+
+  if [[ "$include_key" == true ]]; then
+    chmod 600 "$report_file" 2>/dev/null || true
+    log_warn '该文件包含明文 API Key，请通过安全渠道传递，交付后及时删除本地副本。'
+  fi
+  log_info "交付清单：$report_file"
+}
+
 # ==================== 阶段 1：创建 EA 订阅 ====================
 
 is_fatal_billing_error() {
@@ -1038,6 +1172,7 @@ stage_deploy_models() {
   done < "$rows_file"
 
   log_info "结果文件：$RESULT_FILE"
+  save_delivery_report "$rows_file"
   return $ok
 }
 

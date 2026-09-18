@@ -1,5 +1,23 @@
 # 更新记录
 
+## [1.0.2] - 2026-09-18
+
+### 新增
+
+- 阶段 3 正式执行完成后自动生成交付清单，输出到 `delivery_reports/`。
+- 交付清单按项目输出，每个项目一行，包含订阅、项目、区域、部署数量和全部已部署模型。
+- 同时输出三个 Endpoint：`OpenAIEndpoint`、`ProjectEndpoint`、`ServicesEndpoint`。
+- 交付清单结束前通过交互询问是否包含 API Key，默认不包含。
+- 包含 API Key 的文件名带 `_WITH_KEY` 后缀，Bash 版自动将权限设为 `600`。
+- 清单数据取自 Azure 实时状态，已存在的历史部署也会一并列出。
+
+### 修复与改进
+
+- 缺少 `Microsoft.CognitiveServices/accounts/listKeys/action` 权限时，`ApiKey` 列留空并继续执行，不中断流程。
+- 预演模式不再生成交付清单，避免产生内容不准确的交付文件。
+- `.gitignore` 增加 `delivery_reports/` 和 `script_backups/`，避免凭据和备份进入仓库。
+- 调整 README 中关于公开仓库的措辞，改为通用的凭据保护提示，避免使用方误解。
+
 ## [1.0.1] - 2026-09-16
 
 ### 修复
