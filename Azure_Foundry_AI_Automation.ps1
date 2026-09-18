@@ -430,17 +430,17 @@ function Confirm-EaOnlyStage {
 
 # ==================== 公共 Azure 辅助 ====================
 
-# gpt-image/dall-e/sora 等非文本模型的配额单位通常不是“千 TPM”，不能按文本模型的 K/M 规则显示。
-$script:NonTpmModelPattern = '(?i)(gpt-image|dall-e|dalle|sora)'
+# 当前 Azure 模型配额只有 TPM（文本类）和 RPM（gpt-image/dall-e/sora 等按请求计费）两种类型。
+$script:RpmModelPattern = '(?i)(gpt-image|dall-e|dalle|sora)'
 
-function Test-IsNonTpmModel {
+function Test-IsRpmModel {
     param([string]$ModelName)
-    -not [string]::IsNullOrWhiteSpace($ModelName) -and $ModelName -match $script:NonTpmModelPattern
+    -not [string]::IsNullOrWhiteSpace($ModelName) -and $ModelName -match $script:RpmModelPattern
 }
 
 function Format-Capacity {
     param([int]$CapacityK, [string]$ModelName = '')
-    if (Test-IsNonTpmModel -ModelName $ModelName) { return "$CapacityK（非 TPM，具体单位以 Azure 门户为准）" }
+    if (Test-IsRpmModel -ModelName $ModelName) { return "$CapacityK RPM" }
     if ($CapacityK -lt 1000) { return "$CapacityK K TPM" }
     "{0:0.###} M TPM" -f ($CapacityK / 1000.0)
 }

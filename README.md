@@ -1,6 +1,6 @@
 # Azure Foundry AI Automation
 
-当前版本：`v1.0.2` · [更新记录](CHANGELOG.md)
+当前版本：`v1.0.3` · [更新记录](CHANGELOG.md)
 
 用于 Azure Foundry AI 生命周期自动化的 Bash 和 PowerShell 脚本集合，支持订阅准备、Foundry 资源创建、按剩余配额批量部署模型，以及将已有部署扩容至可用配额上限。
 
@@ -218,7 +218,7 @@ BillingAccountName,EnrollmentAccountName,SubscriptionName,SubscriptionId,Resourc
 | `ModelVersion` | 该行模型的默认版本 |
 | `ModelFormat` | 该行模型的默认格式，留空按 `OpenAI` 处理 |
 | `DeploymentType` | SKU，留空按 `GlobalStandard` 处理 |
-| `DeploymentCapacityK` | 留空表示自动用满剩余配额；填数字表示固定容量（K TPM，仅对文本类模型有效；`gpt-image-*`/`dall-e`/`sora` 等模型的配额单位不是 TPM，脚本会自动识别并在日志/交付清单中单独标注，不套用 K/M 换算） |
+| `DeploymentCapacityK` | 留空表示自动用满剩余配额；填数字表示固定容量（K TPM，仅对文本类模型有效；`gpt-image-*`/`dall-e`/`sora` 等模型的配额单位是 RPM，脚本会自动识别并在日志/交付清单中显示为 `RPM`，不套用 K/M 换算） |
 
 `ModelNames` 每项支持以下写法，省略的部分回退到该行的 `ModelVersion` / `ModelFormat` / `DeploymentType`：
 
@@ -250,7 +250,7 @@ gpt-5.6-sol-dz=gpt-5.6-sol:::DataZoneStandard  自定义部署名 + 单独指定
    - 使用已有订阅时，CSV 中的 `SubscriptionName` 必须与 Azure Portal 中的真实订阅名称严格匹配，否则脚本会拒绝执行以防止误操作。
 5. **配额与模型存在性**：
    - 部署前请确认目标模型在所选 Azure 区域有对应 SKU（如 `GlobalStandard` 或 `DataZoneStandard`）的配额项。
-   - 日志与交付清单中的配额单位（K/M TPM）仅对文本类模型有效；`gpt-image-*`、`dall-e`、`sora` 等模型基于名称关键字识别为非 TPM 类型，会显示原始数值并标注"具体单位以 Azure 门户为准"。这是启发式匹配，如遇到未覆盖的新模型类型，请以 Azure 门户实际显示的配额单位为准。
+   - 日志与交付清单中的配额单位目前只有两种：**TPM**（文本类模型，按 K/M 千进制显示，如 `10 K TPM`、`3.333 M TPM`）和 **RPM**（按请求计费，直接显示原始数值，如 `10 RPM`）。`gpt-image-*`、`dall-e`、`sora` 等模型基于名称关键字识别为 RPM 类型。这是启发式匹配，如遇到未覆盖的新模型类型，请以 Azure 门户实际显示的配额单位为准。
 6. **警惕在 Portal 上手动删除资源引发的软删除冲突**：
    - 删除资源组会级联删除组内所有 Foundry 账户，账户随即进入软删除状态。
    - 若某 Foundry 账户下**只有一个（默认）项目**，直接在 Portal 删除这个项目，很可能会连账户一起删除（而不仅仅是项目本身），进而触发软删除保护。

@@ -222,9 +222,9 @@ format_capacity() {
 import re, sys
 value = int(sys.argv[1])
 model = sys.argv[2] if len(sys.argv) > 2 else ''
-# gpt-image/dall-e/sora 等非文本模型的配额单位通常不是"千 TPM"，不能按文本模型的 K/M 规则显示。
+# 当前 Azure 模型配额只有 TPM（文本类）和 RPM（gpt-image/dall-e/sora 等按请求计费）两种类型。
 if re.search(r'(?i)(gpt-image|dall-e|dalle|sora)', model):
-    print(f"{value}（非 TPM，具体单位以 Azure 门户为准）")
+    print(f"{value} RPM")
 elif value < 1000:
     print(f"{value} K TPM")
 else:
