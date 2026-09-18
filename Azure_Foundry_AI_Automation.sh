@@ -24,7 +24,7 @@ fi
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.0.2"
+SCRIPT_VERSION="1.0.3"
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 TENANT_ID=""
@@ -218,10 +218,17 @@ azure_login() {
 }
 
 format_capacity() {
-  python3 - "$1" <<'PY'
-import sys
+  python3 - "$1" "${2:-}" <<'PY'
+import re, sys
 value = int(sys.argv[1])
-print(f"{value} K" if value < 1000 else f"{value/1000:g} M")
+model = sys.argv[2] if len(sys.argv) > 2 else ''
+# gpt-image/dall-e/sora 等非文本模型的配额单位通常不是"千 TPM"，不能按文本模型的 K/M 规则显示。
+if re.search(r'(?i)(gpt-image|dall-e|dalle|sora)', model):
+    print(f"{value}（非 TPM，具体单位以 Azure 门户为准）")
+elif value < 1000:
+    print(f"{value} K TPM")
+else:
+    print(f"{value/1000:g} M TPM")
 PY
 }
 
@@ -327,8 +334,8 @@ for index, row in enumerate(rows, start=2):
     location = (row.get('Location') or '').strip().lower()
     rg = (row.get('ResourceGroupName') or '').strip().lower()
     if foundry:
-        if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,62}[a-z0-9]', foundry):
-            errors.append(f'第 {index} 行：FoundryResourceName「{foundry}」必须为 2-64 位小写字母、数字或连字符，且以字母或数字开头结尾。')
+        if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9-]{0,62}[a-zA-Z0-9]', foundry):
+            errors.append(f'第 {index} 行：FoundryResourceName「{foundry}」必须为 2-64 位字母、数字或连字符（不支持下划线等其他字符），且以字母或数字开头结尾。大小写会保留在资源名中，但生成的自定义子域名会统一转换为小写。')
         foundry_key = f"{sub_id.lower()}|{rg}|{foundry.lower()}"
         if foundry_key in foundry_meta and foundry_meta[foundry_key] != location:
             errors.append(f'第 {index} 行：FoundryResourceName「{foundry}」在同一资源组中已配置了不同的区域。')
@@ -564,7 +571,7 @@ get_account_endpoints() {
     --resource-group "$(csv_field "$row_json" 'ResourceGroupName')" \
     --name "$(csv_field "$row_json" 'FoundryResourceName')" 2>/dev/null |
     jq -r '.properties.customSubDomainName // ""')
-  [[ -z "$sub_domain" ]] && sub_domain=$(csv_field "$row_json" 'FoundryResourceName')
+  [[ -z "$sub_domain" ]] && sub_domain=$(csv_field "$row_json" 'FoundryResourceName' | tr '[:upper:]' '[:lower:]')
   printf '%s\t%s\t%s' \
     "https://${sub_domain}.openai.azure.com/" \
     "https://${sub_domain}.services.ai.azure.com/api/projects/${project}" \
@@ -639,11 +646,16 @@ save_delivery_report() {
 
     models=""
     count=0
-    local ex_name ex_model ex_fmt ex_ver ex_sku ex_cap
+    local ex_name ex_model ex_fmt ex_ver ex_sku ex_cap cap_text
     while IFS=$'\t' read -r ex_name ex_model ex_fmt ex_ver ex_sku ex_cap; do
       [[ -z "$ex_name" ]] && continue
       count=$((count + 1))
-      models="${models}${models:+; }${ex_name}(${ex_model}, ${ex_sku}, ${ex_cap}K)"
+      cap_text=$(format_capacity "$ex_cap" "$ex_model")
+      if [[ "$ex_name" == "$ex_model" ]]; then
+        models="${models}${models:+; }${ex_name}(${ex_sku}, ${cap_text})"
+      else
+        models="${models}${models:+; }${ex_name}(${ex_model}, ${ex_sku}, ${cap_text})"
+      fi
     done < <(get_existing_deployments "$row_json" 2>/dev/null || true)
 
     api_key=""
@@ -910,11 +922,13 @@ stage_create_foundry() {
 
   local ok=0
   while IFS= read -r row_json; do
-    local sub_name sub_id rg foundry project location
+    local sub_name sub_id rg foundry foundry_domain project location
     sub_name=$(csv_field "$row_json" 'SubscriptionName')
     sub_id=$(csv_field "$row_json" 'SubscriptionId')
     rg=$(csv_field "$row_json" 'ResourceGroupName')
     foundry=$(csv_field "$row_json" 'FoundryResourceName')
+    # customSubDomainName 是 DNS 主机名的一部分，Azure 要求全小写；账户资源名本身仍保留 CSV 原始大小写。
+    foundry_domain=$(printf '%s' "$foundry" | tr '[:upper:]' '[:lower:]')
     project=$(csv_field "$row_json" 'DefaultProjectName')
     location=$(csv_field "$row_json" 'Location')
 
@@ -984,7 +998,7 @@ stage_create_foundry() {
       kind=$(printf '%s' "$account_json" | jq -r '.kind // ""')
       existing_domain=$(printf '%s' "$account_json" | jq -r '.properties.customSubDomainName // ""')
       existing_location=$(printf '%s' "$account_json" | jq -r '.location // ""' | tr '[:upper:]' '[:lower:]')
-      if [[ "$kind" != "AIServices" || "$existing_domain" != "$foundry" || "$existing_location" != "$(printf '%s' "$location" | tr '[:upper:]' '[:lower:]')" ]]; then
+      if [[ "$kind" != "AIServices" || "$existing_domain" != "$foundry_domain" || "$existing_location" != "$(printf '%s' "$location" | tr '[:upper:]' '[:lower:]')" ]]; then
         error_message="Foundry 账户 '$foundry' 已存在但类型、区域或自定义域名不一致。"
         log_error "$error_message"
         write_result_row "$sub_name" "$sub_id" "$rg" "$foundry" "$project" "$location" "$group_status" Conflict NotStarted "$error_message"
@@ -999,7 +1013,7 @@ stage_create_foundry() {
       local body_file error_file
       body_file="$TEMP_DIR/account-${sub_id}.json"
       error_file="$TEMP_DIR/account-${sub_id}.error"
-      jq -n --arg loc "$location" --arg domain "$foundry" \
+      jq -n --arg loc "$location" --arg domain "$foundry_domain" \
         '{location:$loc, kind:"AIServices", sku:{name:"S0"}, identity:{type:"SystemAssigned"},
           properties:{customSubDomainName:$domain, allowProjectManagement:true}}' > "$body_file"
       if ! az_rest PUT "$account_url" "$body_file" >/dev/null 2>"$error_file"; then
@@ -1153,7 +1167,7 @@ stage_deploy_models() {
         capacity=$remaining
       fi
 
-      log_info "  ${target_dep_name}（${actual_sku}）：总配额 $(format_capacity "$total")，已分配 $(format_capacity "$used")，剩余 $(format_capacity "$remaining")，本次部署 $(format_capacity "$capacity")"
+      log_info "  ${target_dep_name}（${actual_sku}）：总配额 $(format_capacity "$total" "$model")，已分配 $(format_capacity "$used" "$model")，剩余 $(format_capacity "$remaining" "$model")，本次部署 $(format_capacity "$capacity" "$model")"
       if ((capacity <= 0)); then
         write_result_row "$sub_name" "$foundry" "$target_dep_name" "$actual_sku" 0 NoQuota "剩余配额为 0，已跳过。"
         continue
@@ -1238,7 +1252,7 @@ stage_scale_up_quota() {
       target=$((capacity + remaining))
       increase=$((target - capacity))
 
-      log_info "  ${deployment_name}：当前 $(format_capacity "$capacity")，共享已分配 $(format_capacity "$used")，总配额 $(format_capacity "$total")，剩余 $(format_capacity "$remaining")，预计提升 $(format_capacity "$increase")"
+      log_info "  ${deployment_name}：当前 $(format_capacity "$capacity" "$model_name")，共享已分配 $(format_capacity "$used" "$model_name")，总配额 $(format_capacity "$total" "$model_name")，剩余 $(format_capacity "$remaining" "$model_name")，预计提升 $(format_capacity "$increase" "$model_name")"
       if ((remaining <= 0)); then
         write_result_row "$sub_name" "$foundry" "$deployment_name" "$capacity" "$target" 0 Skipped ""
         continue

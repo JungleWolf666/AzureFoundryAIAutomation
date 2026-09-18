@@ -26,7 +26,7 @@ param(
     [switch]$Help
 )
 
-$ScriptVersion = '1.0.2'
+$ScriptVersion = '1.0.3'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -280,8 +280,8 @@ function Import-Plan {
         $subIdKey = if (-not [string]::IsNullOrWhiteSpace($subscriptionId)) { $subscriptionId.ToLowerInvariant() } else { '' }
         $loc = ([string]$row.Location).ToLowerInvariant()
         if (-not [string]::IsNullOrWhiteSpace($foundryName)) {
-            if ($foundryName -notmatch '^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$') {
-                throw "第 $rowNumber 行：FoundryResourceName '$foundryName' 必须为 2-64 位小写字母、数字或连字符，且以字母或数字开头结尾。"
+            if ($foundryName -notmatch '^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}[a-zA-Z0-9]$') {
+                throw "第 $rowNumber 行：FoundryResourceName '$foundryName' 必须为 2-64 位字母、数字或连字符（不支持下划线等其他字符），且以字母或数字开头结尾。大小写会保留在资源名中，但生成的自定义子域名会统一转换为小写。"
             }
             $foundryKey = "$subIdKey|$rg|$($foundryName.ToLowerInvariant())"
             if ($foundryMeta.ContainsKey($foundryKey)) {
@@ -430,10 +430,19 @@ function Confirm-EaOnlyStage {
 
 # ==================== 公共 Azure 辅助 ====================
 
+# gpt-image/dall-e/sora 等非文本模型的配额单位通常不是“千 TPM”，不能按文本模型的 K/M 规则显示。
+$script:NonTpmModelPattern = '(?i)(gpt-image|dall-e|dalle|sora)'
+
+function Test-IsNonTpmModel {
+    param([string]$ModelName)
+    -not [string]::IsNullOrWhiteSpace($ModelName) -and $ModelName -match $script:NonTpmModelPattern
+}
+
 function Format-Capacity {
-    param([int]$CapacityK)
-    if ($CapacityK -lt 1000) { return "$CapacityK K" }
-    "{0:0.###} M" -f ($CapacityK / 1000.0)
+    param([int]$CapacityK, [string]$ModelName = '')
+    if (Test-IsNonTpmModel -ModelName $ModelName) { return "$CapacityK（非 TPM，具体单位以 Azure 门户为准）" }
+    if ($CapacityK -lt 1000) { return "$CapacityK K TPM" }
+    "{0:0.###} M TPM" -f ($CapacityK / 1000.0)
 }
 
 function Resolve-Subscription {
@@ -534,7 +543,7 @@ function Get-AccountEndpoints {
     param([object]$Row)
     $account = Invoke-AzJson -Arguments @('cognitiveservices', 'account', 'show', '--resource-group', [string]$Row.ResourceGroupName, '--name', [string]$Row.FoundryResourceName)
     $subDomain = [string](Get-Prop $account 'properties.customSubDomainName')
-    if ([string]::IsNullOrWhiteSpace($subDomain)) { $subDomain = [string]$Row.FoundryResourceName }
+    if ([string]::IsNullOrWhiteSpace($subDomain)) { $subDomain = ([string]$Row.FoundryResourceName).ToLowerInvariant() }
     [pscustomobject]@{
         OpenAIEndpoint   = "https://$subDomain.openai.azure.com/"
         ProjectEndpoint  = "https://$subDomain.services.ai.azure.com/api/projects/$([string]$Row.DefaultProjectName)"
@@ -579,7 +588,15 @@ function Save-DeliveryReport {
             Resolve-Subscription -Row $row -Accounts $Accounts | Out-Null
             $endpoints = Get-AccountEndpoints -Row $row
             $deployments = @(Get-ExistingDeployments -Row $row)
-            $modelText = (@($deployments | ForEach-Object { '{0}({1}, {2}, {3}K)' -f $_.DeploymentName, $_.ModelName, $_.SkuName, $_.CapacityK }) -join '; ')
+            $modelText = (@($deployments | ForEach-Object {
+                        $capText = Format-Capacity $_.CapacityK $_.ModelName
+                        if ($_.DeploymentName -eq $_.ModelName) {
+                            '{0}({1}, {2})' -f $_.DeploymentName, $_.SkuName, $capText
+                        }
+                        else {
+                            '{0}({1}, {2}, {3})' -f $_.DeploymentName, $_.ModelName, $_.SkuName, $capText
+                        }
+                    }) -join '; ')
             $apiKey = if ($includeKey) { Get-AccountApiKey -Row $row } else { '' }
             $report.Add([pscustomobject]@{
                     SubscriptionName    = $row.SubscriptionName
@@ -784,7 +801,8 @@ function Invoke-StageCreateFoundry {
     foreach ($row in $rows) {
         $groupStatus = 'Pending'; $foundryStatus = 'Pending'; $projectStatus = 'Pending'; $errorMessage = ''
         $location = [string]$row.Location
-        $customDomain = [string]$row.FoundryResourceName
+        # customSubDomainName 是 DNS 主机名的一部分，Azure 要求全小写；账户资源名本身仍保留 CSV 原始大小写。
+        $customDomain = ([string]$row.FoundryResourceName).ToLowerInvariant()
 
         try {
             Write-Info "检查订阅 '$($row.SubscriptionName)'（$($row.SubscriptionId)）"
@@ -958,7 +976,7 @@ function Invoke-StageDeployModels {
                     $hasConfigured = [int]::TryParse([string]$row.DeploymentCapacityK, [ref]$configured)
                     $capacityK = if ($hasConfigured -and $configured -gt 0) { [math]::Min($configured, $remaining) } else { $remaining }
 
-                    Write-Info ("  {0}（{1}）：总配额 {2}，已分配 {3}，剩余 {4}，本次部署 {5}" -f $targetDepName, $specSku, (Format-Capacity $quota.Total), (Format-Capacity $quota.Allocated), (Format-Capacity $remaining), (Format-Capacity $capacityK))
+                    Write-Info ("  {0}（{1}）：总配额 {2}，已分配 {3}，剩余 {4}，本次部署 {5}" -f $targetDepName, $specSku, (Format-Capacity $quota.Total $targetModel), (Format-Capacity $quota.Allocated $targetModel), (Format-Capacity $remaining $targetModel), (Format-Capacity $capacityK $targetModel))
                     if ($capacityK -le 0) {
                         $status = 'NoQuota'
                         $errorMessage = '剩余配额为 0，已跳过。'
@@ -1027,7 +1045,7 @@ function Invoke-StageScaleUpQuota {
                 $target = $deployment.CapacityK + $remaining
                 $increase = [math]::Max(0, $target - $deployment.CapacityK)
 
-                Write-Info ("  {0}：当前 {1}，共享已分配 {2}，总配额 {3}，剩余 {4}，预计提升 {5}" -f $deployment.DeploymentName, (Format-Capacity $deployment.CapacityK), (Format-Capacity $quota.Allocated), (Format-Capacity $quota.Total), (Format-Capacity $remaining), (Format-Capacity $increase))
+                Write-Info ("  {0}：当前 {1}，共享已分配 {2}，总配额 {3}，剩余 {4}，预计提升 {5}" -f $deployment.DeploymentName, (Format-Capacity $deployment.CapacityK $deployment.ModelName), (Format-Capacity $quota.Allocated $deployment.ModelName), (Format-Capacity $quota.Total $deployment.ModelName), (Format-Capacity $remaining $deployment.ModelName), (Format-Capacity $increase $deployment.ModelName))
 
                 if ($remaining -le 0) { $status = 'Skipped' }
                 else {

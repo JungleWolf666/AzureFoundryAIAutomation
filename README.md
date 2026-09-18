@@ -43,7 +43,7 @@ AzureFoundryAIAutomation/
 └── README.md                          # 使用说明
 ```
 
-两个脚本功能一致，按操作系统选择一个运行即可。脚本运行后会在当前目录自动创建 `logs/` 和 `results/` 文件夹；这些运行产物不纳入仓库提交。
+两个脚本功能一致，按操作系统选择一个运行即可。脚本运行后会在当前目录自动创建 `logs/`、`results/`、`csv_backups/` 和 `delivery_reports/` 文件夹；这些运行产物不纳入仓库提交。
 
 ## 获取与快速开始
 
@@ -211,14 +211,14 @@ BillingAccountName,EnrollmentAccountName,SubscriptionName,SubscriptionId,Resourc
 | `SubscriptionName` | 订阅名称。使用已有订阅时必须与 Azure 中的真实名称完全一致 |
 | `SubscriptionId` | 创建订阅前留空，创建成功后自动回填；使用已有订阅时手工填写 |
 | `ResourceGroupName` | 要创建或复用的资源组 |
-| `FoundryResourceName` | Foundry 账户资源名，同时作为 `customSubDomainName` |
+| `FoundryResourceName` | Foundry 账户资源名，同时用于生成 `customSubDomainName`（2-64 位字母/数字/连字符，不支持下划线；支持大小写，但自定义子域名会自动转小写） |
 | `DefaultProjectName` | Foundry 账户下的默认 Project |
 | `Location` | 资源组、Foundry 账户和 Project 的区域 |
 | `ModelNames` | 分号分隔的模型列表，部署和扩容阶段共用 |
 | `ModelVersion` | 该行模型的默认版本 |
 | `ModelFormat` | 该行模型的默认格式，留空按 `OpenAI` 处理 |
 | `DeploymentType` | SKU，留空按 `GlobalStandard` 处理 |
-| `DeploymentCapacityK` | 留空表示自动用满剩余配额；填数字表示固定容量（K TPM） |
+| `DeploymentCapacityK` | 留空表示自动用满剩余配额；填数字表示固定容量（K TPM，仅对文本类模型有效；`gpt-image-*`/`dall-e`/`sora` 等模型的配额单位不是 TPM，脚本会自动识别并在日志/交付清单中单独标注，不套用 K/M 换算） |
 
 `ModelNames` 每项支持以下写法，省略的部分回退到该行的 `ModelVersion` / `ModelFormat` / `DeploymentType`：
 
@@ -242,18 +242,25 @@ gpt-5.6-sol-dz=gpt-5.6-sol:::DataZoneStandard  自定义部署名 + 单独指定
 2. **日期格式必须为标准连字符格式**：
    - 模型版本请务必使用 **`YYYY-MM-DD`（如 `2026-07-09`）**。
    - 若使用 Excel 编辑 CSV，请注意单元格格式，避免被自动转换为 `2026/7/9`（虽然脚本内置了自动容错归一化，但建议源文件保持标准格式）。
-3. **FoundryResourceName 唯一性**：
-   - `FoundryResourceName` 同时作为 Custom Domain Name，在 Azure 全局公共命名空间内唯一，不可使用 `foundry-ai-01` 等过于通用的名称。
+3. **FoundryResourceName 命名规则与唱一性**：
+   - 允许字母（不区分大小写）、数字、连字符 `-`，2-64 位，首尾必须为字母或数字，**不支持下划线**。
+   - `FoundryResourceName` 同时作为 Custom Domain Name（自定义子域名），子域名本质上是 DNS 主机名的一部分，脚本会自动将它转为全小写后写入 Azure（Azure 账户资源名本身仍保留您在 CSV 中填写的大小写）。
+   - 在 Azure 全局公共命名空间内必须全局唯一，不可使用 `foundry-ai-01` 等过于通用的名称。
 4. **订阅名与订阅 ID 一致性校验**：
    - 使用已有订阅时，CSV 中的 `SubscriptionName` 必须与 Azure Portal 中的真实订阅名称严格匹配，否则脚本会拒绝执行以防止误操作。
 5. **配额与模型存在性**：
    - 部署前请确认目标模型在所选 Azure 区域有对应 SKU（如 `GlobalStandard` 或 `DataZoneStandard`）的配额项。
+   - 日志与交付清单中的配额单位（K/M TPM）仅对文本类模型有效；`gpt-image-*`、`dall-e`、`sora` 等模型基于名称关键字识别为非 TPM 类型，会显示原始数值并标注"具体单位以 Azure 门户为准"。这是启发式匹配，如遇到未覆盖的新模型类型，请以 Azure 门户实际显示的配额单位为准。
+6. **警惕在 Portal 上手动删除资源引发的软删除冲突**：
+   - 删除资源组会级联删除组内所有 Foundry 账户，账户随即进入软删除状态。
+   - 若某 Foundry 账户下**只有一个（默认）项目**，直接在 Portal 删除这个项目，很可能会连账户一起删除（而不仅仅是项目本身），进而触发软删除保护。
+   - 账户或项目被软删除后，同名重新创建会被 Azure 拒绝（`FlagMustBeSetForRestore`），必须先清除才能重新创建。详细排查/解决步骤见下方「常见问题」中的 `FlagMustBeSetForRestore` 条目。
 
 ---
 
 ## 命名建议
 
-`FoundryResourceName` 同时作为 Custom Domain Name，必须**全局唯一**，不要使用 `foundry-ai-01` 这类通用名：
+`FoundryResourceName` 同时作为 Custom Domain Name，必须**全局唯一**，不要使用 `foundry-ai-01` 这类通用名。允许大小写字母、数字、连字符（不支持下划线），脚本会在写入 Azure 时自动把自定义子域名转换为小写，无需手工改成全小写：
 
 ```text
 <customer-short>-foundry-<workload>-<region>-<seq>
@@ -338,7 +345,8 @@ bash Azure_Foundry_AI_Automation.sh --tenant-id "<TENANT-ID>" --stage CreateFoun
 
 #### 阶段 3：单独批量部署模型（按剩余配额）
 > 依赖 CSV 字段：`SubscriptionId`、`ResourceGroupName`、`FoundryResourceName`、`ModelNames` 等  
-> 自动探测目标区域剩余共享配额，并在账户中批量创建指定模型部署。`DeploymentCapacityK` 留空时使用全部剩余配额；填写正整数时作为本次容量上限，但如果剩余配额更少，实际部署容量会自动降到剩余配额。
+> 自动探测目标区域剩余共享配额，并在账户中批量创建指定模型部署。`DeploymentCapacityK` 留空时使用全部剩余配额；填写正整数时作为本次容量上限，但如果剩余配额更少，实际部署容量会自动降到剩余配额。  
+> 正式执行完成后会自动生成交付清单，并询问是否包含 API Key（默认不包含），详见下方「交付清单」章节。
 
 ```powershell
 # 预演
@@ -399,6 +407,10 @@ bash Azure_Foundry_AI_Automation.sh --tenant-id "<TENANT-ID>" --stage All
 - 回填 CSV 前自动将原文件备份到 `csv_backups/`，并使用原子替换写入；该目录专门保存 CSV 历史备份，不是脚本备份目录
 - 未注册 `Microsoft.CognitiveServices` 时自动注册并记录到日志
 - 阶段 1 仅调用订阅别名创建 API；CSP 订阅不会因为运行阶段 1 而获得创建权限
+- 交付清单默认不包含 API Key，需要在阶段 3 结束时主动输入大写 `KEY` 才会导出
+- 含 API Key 的清单文件名带 `_WITH_KEY` 后缀，Bash 版会将文件权限设为 `600`
+- API Key 只写入交付清单文件，不会输出到终端或日志
+- `csv_backups/`、`logs/`、`results/`、`delivery_reports/` 已加入 `.gitignore`，避免凭据误入仓库
 
 ## 交付清单（阶段 3 自动生成）
 
@@ -457,6 +469,34 @@ delivery_reports/foundry_endpoints_<时间戳>_WITH_KEY.csv
 订阅名不匹配：CSV 中的 `SubscriptionName` 与 Azure 实际名称不一致，脚本会拒绝继续，请改成 Portal 中显示的真实名称。
 
 区域没有配额项：目标区域未提供该模型或该 SKU 组合，请更换区域或模型。
+
+`FlagMustBeSetForRestore`：目标 Foundry 账户同名资源之前被删除过，仍处于 Azure 的软删除保护期内，无法直接用同名重新创建。常见诱因：
+
+- 在 Portal 手动删除了资源组（会级联删除组内所有账户）。
+- 在 Portal 手动删除了账户本身。
+- 账户下只有一个（默认）项目时，在 Portal 删除了这个项目——实测发现这种情况下账户会被一起删除，而不仅仅是移除项目。
+
+解决步骤：
+
+1. 确认是否处于软删除状态（需先 `az account set --subscription <订阅ID>` 切换到对应订阅）：
+   ```bash
+   az cognitiveservices account list-deleted --output table
+   ```
+2. 确认不需要恢复原账户后，执行清除（**不可逆操作**，请确认账户内无需保留的数据/密钥/部署）：
+   ```bash
+   az cognitiveservices account purge --location <区域> --resource-group <资源组> --name <账户名>
+   ```
+   `purge` 返回退出码 `0` 仅表示请求被接受，不代表立即在所有后端节点生效。实测有时需要等待几分钟到几十分钟才真正清除完成；若清除后立即重跑仍报同样错误，请重新执行 `list-deleted` 确认，必要时再次 `purge` 并耐心等待。
+3. 确认 `list-deleted` 返回为空后，重新运行阶段 2（`CreateFoundry`）重建账户和默认项目，再运行阶段 3重新部署模型（模型部署挂在账户下，账户被删除后部署记录也会一并丢失，必须重新部署，光跑阶段 3 不够）。
+
+预防建议：
+
+- 尽量不要在 Portal 上手动删除资源组/账户/项目，改用 CLI 精确操作。
+- 如果只想调整项目配置，优先直接在 Portal 编辑项目设置，而不是删除重建。
+- 确实需要删除项目时，先新建一个项目确认可用后再删除旧项目，确保账户下至少始终保留一个项目；或直接用 CLI 删除项目（不会级联删除账户）：
+  ```bash
+  az cognitiveservices account project delete --name <账户名> --resource-group <资源组> --project-name <项目名>
+  ```
 
 ## 灵活配置与多场景参考
 
