@@ -12,7 +12,7 @@
 |---|---|---|
 | `CreateSubscription` | 在 EA Enrollment Account 下创建订阅，并回填 `SubscriptionId`【**仅限 EA 企业协议订阅**，见下方提示】 | `create_ea_subscriptions_from_csv` |
 | `CreateFoundry` | 创建资源组、Foundry 服务（AIServices）和 Foundry 默认项目 | `provision_foundry_from_csv` |
-| `DeployModels` | 按剩余配额批量部署模型 | `Azure_Foundry_AI_batch_deploy` |
+| `DeployModels` | 按剩余配额批量部署模型，执行完成后自动生成交付清单（含 `OpenAIEndpoint`/`ProjectEndpoint`/`ServicesEndpoint` 三个 Endpoint，以及可选的 API Key），详见下方[交付清单](#交付清单阶段-3-自动生成) | `Azure_Foundry_AI_batch_deploy` |
 | `ScaleUpQuota` | 把已有部署的容量扩到剩余配额上限 | `Azure_Foundry_AI_scale_up` |
 
 ## 开始前必读
@@ -410,7 +410,6 @@ bash Azure_Foundry_AI_Automation.sh --tenant-id "<TENANT-ID>" --stage All
 - 交付清单默认不包含 API Key，需要在阶段 3 结束时主动输入大写 `KEY` 才会导出
 - 含 API Key 的清单文件名带 `_WITH_KEY` 后缀，Bash 版会将文件权限设为 `600`
 - API Key 只写入交付清单文件，不会输出到终端或日志
-- `csv_backups/`、`logs/`、`results/`、`delivery_reports/` 已加入 `.gitignore`，避免凭据误入仓库
 
 ## 交付清单（阶段 3 自动生成）
 
@@ -446,7 +445,7 @@ API Key 是明文长期凭据，一旦泄露即可直接调用该 Foundry 资源
 - 预演模式不会生成交付清单。
 - 若账号缺少 `Microsoft.CognitiveServices/accounts/listKeys/action` 权限，该列留空并继续，不会中断。
 
-> ⚠️ 带 `_WITH_KEY` 的文件包含明文凭据，等同于该 Foundry 资源的访问权限。请通过安全渠道传递给客户，要求客户妥善保管，并在交付完成后删除本地副本。该目录已加入 `.gitignore`，不会被提交到仓库。
+> ⚠️ 带 `_WITH_KEY` 的文件包含明文凭据，等同于该 Foundry 资源的访问权限。请通过安全渠道传递给客户，要求客户妥善保管，并在交付完成后删除本地副本。
 
 ## 输出
 
