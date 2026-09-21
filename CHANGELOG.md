@@ -1,5 +1,23 @@
 # 更新记录
 
+## [1.0.4] - 2026-09-21
+
+### 新增
+
+- 新增第 5 阶段 `ExportCredentials`，可独立补导出 Endpoint/API Key，或按 CSV 中明确列出的订阅盘点所有 Foundry 账户和项目。
+- 模式 2 支持没有 Foundry Project 的旧版账户，改为账户级导出，并严格限制在 CSV 指定的订阅范围内。
+- PowerShell 与 Bash 版本功能对齐，菜单全流程调整为第 6 项；新增 `-SkipLogin`/`--skip-login` 用于复用已登录的 Azure CLI 会话。
+- 新增 `-BrowserLogin`/`--browser-login` 登录说明：默认登录方式仍为设备代码流；遇到租户阻止设备代码流时，可改用浏览器登录，且每次运行都需要携带该参数。
+
+### 修复与改进
+
+- 模式 2 改用 ARM REST 读取项目列表，避免依赖较新 Azure CLI 版本；Bash 版本修复 macOS Bash 3.2 下的变量边界和 JSONL 解析问题。
+- 空项目名不再生成残缺的 `ProjectEndpoint`；配额和交付清单继续保持 TPM/RPM 格式一致。
+
+### 文档
+
+- README 补充 `53003 BlockedByConditionalAccess` 登录排查，并明确说明默认设备代码登录与 `-BrowserLogin`/`--browser-login` 浏览器登录的选择方式。
+
 ## [1.0.3] - 2026-09-18
 
 ### 修复与改进

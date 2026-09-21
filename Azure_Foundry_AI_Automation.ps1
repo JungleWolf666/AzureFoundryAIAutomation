@@ -3,7 +3,7 @@
     Azure Foundry AI 一站式全生命周期统一脚本：创建 Azure 订阅、创建 Foundry 服务和项目、批量部署模型、批量扩容配额。
 
 .DESCRIPTION
-    四个阶段的参数全部来自同一个 CSV，避免在多个脚本中重复维护配置。
+    五个自动化阶段的参数全部来自同一个 CSV。
     不带 -Stage 参数运行时进入交互式菜单。
 
 .NOTES
@@ -15,18 +15,19 @@
 [CmdletBinding()]
 param(
     [string]$TenantId,
-    [ValidateSet('CreateSubscription', 'CreateFoundry', 'DeployModels', 'ScaleUpQuota', 'All')]
+    [ValidateSet('CreateSubscription', 'CreateFoundry', 'DeployModels', 'ScaleUpQuota', 'ExportCredentials', 'All')]
     [string]$Stage,
     [string]$Csv = (Join-Path $PSScriptRoot 'Azure_Foundry_AI_Plan.csv'),
     [string]$OutputRoot = $PSScriptRoot,
     [int]$CreateDelaySeconds = 10,
     [switch]$DryRun,
     [switch]$BrowserLogin,
+    [switch]$SkipLogin,
     [switch]$Version,
     [switch]$Help
 )
 
-$ScriptVersion = '1.0.3'
+$ScriptVersion = '1.0.4'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -66,6 +67,7 @@ if ($Help) {
   .\Azure_Foundry_AI_Automation.ps1 -TenantId <TENANT-ID> -Stage CreateFoundry
   .\Azure_Foundry_AI_Automation.ps1 -TenantId <TENANT-ID> -Stage DeployModels
   .\Azure_Foundry_AI_Automation.ps1 -TenantId <TENANT-ID> -Stage ScaleUpQuota
+  .\Azure_Foundry_AI_Automation.ps1 -TenantId <TENANT-ID> -Stage ExportCredentials
 
   # 4. 全流程依次执行阶段 1 -> 2 -> 3：
   .\Azure_Foundry_AI_Automation.ps1 -TenantId <TENANT-ID> -Stage All -DryRun
@@ -78,6 +80,7 @@ if ($Help) {
                      CreateFoundry       阶段 2：创建资源组、Foundry 服务和 Foundry 项目
                      DeployModels        阶段 3：按剩余配额批量部署 CSV 中的模型
                      ScaleUpQuota        阶段 4：把已有部署的容量扩到剩余配额上限
+                     ExportCredentials   阶段 5：导出 Foundry Endpoint 与 API Key（补导出 / 全量盘点，两种模式交互选择）
                      All                 全流程：依次执行前三个阶段（1 -> 2 -> 3），阶段 1 同样仅限 EA
 
 【EA / CSP 提示】阶段 1（含 All 里的阶段 1）通过 Microsoft.Subscription/aliases API 自助创建订阅，
@@ -91,6 +94,12 @@ if ($Help) {
                         不指定时按待创建数量自动选择：<=20 个用 10 秒，21-50 个用 20 秒，>50 个用 30 秒。
   -DryRun          只显示将执行的动作，不创建或修改任何 Azure 资源。
   -BrowserLogin    使用浏览器登录；默认使用设备码登录。
+                   若登录时报错 53003（Entra 条件访问策略拦截，常见提示为 "Block device code flow"），
+                   优先尝试加上本开关改用浏览器登录，通常无需联系客户管理员调整任何策略即可解决。
+                   注意：只要还在用这个租户，之后每一次运行本脚本都要带上这个开关，不是登录一次就一直有效。
+  -SkipLogin       跳过脚本内置的 az login，使用当前终端已有的登录会话（如客户提供了服务主体并要求预先自行
+                   `az login --service-principal` 登录）。仅当 -BrowserLogin 也被条件访问策略拦截时才需要
+                   考虑这个更复杂的方案。跳过后仍会校验当前会话的租户是否与 -TenantId 一致，不一致会报错退出。
   -Help            显示本帮助。
 
 注：Windows PowerShell/pwsh 必须带 .\ 前缀（当前目录不在命令搜索路径中），不能只写文件名。
@@ -544,9 +553,12 @@ function Get-AccountEndpoints {
     $account = Invoke-AzJson -Arguments @('cognitiveservices', 'account', 'show', '--resource-group', [string]$Row.ResourceGroupName, '--name', [string]$Row.FoundryResourceName)
     $subDomain = [string](Get-Prop $account 'properties.customSubDomainName')
     if ([string]::IsNullOrWhiteSpace($subDomain)) { $subDomain = ([string]$Row.FoundryResourceName).ToLowerInvariant() }
+    # 账户级导出（未启用 Foundry 项目管理）时 DefaultProjectName 为空，不拼接残缺的 ProjectEndpoint。
+    $projectName = [string]$Row.DefaultProjectName
+    $projectEndpoint = if ([string]::IsNullOrWhiteSpace($projectName)) { '' } else { "https://$subDomain.services.ai.azure.com/api/projects/$projectName" }
     [pscustomobject]@{
         OpenAIEndpoint   = "https://$subDomain.openai.azure.com/"
-        ProjectEndpoint  = "https://$subDomain.services.ai.azure.com/api/projects/$([string]$Row.DefaultProjectName)"
+        ProjectEndpoint  = $projectEndpoint
         ServicesEndpoint = "https://$subDomain.cognitiveservices.azure.com/"
     }
 }
@@ -571,7 +583,7 @@ function Confirm-IncludeApiKey {
 
 # 按 订阅 + Foundry 账户 + 项目 去重，每个项目输出一行。
 function Save-DeliveryReport {
-    param([object[]]$Rows, [object[]]$Accounts)
+    param([object[]]$Rows, [object[]]$Accounts, [string]$NamePrefix = 'foundry_endpoints')
     if ($Rows.Count -eq 0) { return }
     if ($DryRun) { Write-Info '预演模式不生成交付清单。'; return }
 
@@ -623,7 +635,7 @@ function Save-DeliveryReport {
     $deliveryDir = Join-Path $OutputRoot 'delivery_reports'
     New-Item -ItemType Directory -Path $deliveryDir -Force | Out-Null
     $suffix = if ($includeKey) { '_WITH_KEY' } else { '' }
-    $path = Join-Path $deliveryDir ("foundry_endpoints_{0}{1}.csv" -f $script:RunId, $suffix)
+    $path = Join-Path $deliveryDir ("{0}_{1}{2}.csv" -f $NamePrefix, $script:RunId, $suffix)
     $report.ToArray() | Export-Csv -LiteralPath $path -NoTypeInformation -Encoding UTF8
     Write-Info "交付清单：$path"
     if ($includeKey) { Write-Warn '该文件包含明文 API Key，请通过安全渠道传递，交付后及时删除本地副本。' }
@@ -1067,6 +1079,152 @@ function Invoke-StageScaleUpQuota {
     $ok
 }
 
+# ==================== 阶段 5：导出 Endpoint 与 API Key ====================
+
+# 只接受合法 GUID 格式的 SubscriptionId，格式错误或为空的行跳过而不中断整体读取。
+function Get-CsvSubscriptionIds {
+    if (-not (Test-Path -LiteralPath $Csv -PathType Leaf)) { throw "CSV 文件不存在：$Csv" }
+    $rows = @(Import-Csv -LiteralPath $Csv)
+    $ids = New-Object System.Collections.Generic.List[string]
+    $rowNumber = 1
+    foreach ($row in $rows) {
+        $rowNumber++
+        $rawValue = [string]$row.SubscriptionId
+        $trimmed = $rawValue.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+        if ($trimmed -ne $rawValue) {
+            Write-Warn "第 $rowNumber 行：SubscriptionId 存在首尾空格，已自动去除后使用：'$trimmed'"
+        }
+        try { [void][guid]::Parse($trimmed) }
+        catch {
+            Write-Warn "第 $rowNumber 行：SubscriptionId '$trimmed' 不是合法 GUID 格式，已跳过。"
+            continue
+        }
+        $lower = $trimmed.ToLowerInvariant()
+        if (-not $ids.Contains($lower)) { $ids.Add($lower) }
+    }
+    $ids.ToArray()
+}
+
+# 模式 1：直接复用阶段 3 的 CSV 行，用于忘记在阶段 3 导出 Key 时补导出。
+function Invoke-ExportFromPlan {
+    $rows = @(Import-Plan -Phase 'DeployModels')
+    $accounts = @(Invoke-AzJson -Arguments @('account', 'list', '--all'))
+    Save-DeliveryReport -Rows $rows -Accounts $accounts
+    $true
+}
+
+# 模式 2：只信任 CSV 里明确列出的 SubscriptionId，账户和项目全部自动发现，避免跨订阅/跨部门误导出。
+function Invoke-ExportFullScan {
+    $ids = @(Get-CsvSubscriptionIds)
+    if ($ids.Count -eq 0) { throw 'CSV 中没有填写任何合法的 SubscriptionId，无法执行全量盘点。' }
+
+    $allSubs = @(Invoke-AzJson -Arguments @('account', 'list', '--all'))
+    $tenantSubs = @($allSubs | Where-Object {
+            ([string](Get-Prop $_ 'tenantId')).ToLowerInvariant() -eq $TenantId.ToLowerInvariant() -and
+            ([string](Get-Prop $_ 'state')) -eq 'Enabled'
+        })
+    $targetSubs = @($tenantSubs | Where-Object { $ids -contains ([string](Get-Prop $_ 'id')).ToLowerInvariant() })
+
+    $foundIds = @($targetSubs | ForEach-Object { ([string](Get-Prop $_ 'id')).ToLowerInvariant() })
+    foreach ($id in $ids) {
+        if ($foundIds -notcontains $id) { Write-Warn "订阅 '$id' 当前登录账号不可见，或不属于租户 $TenantId，或未启用，已跳过。" }
+    }
+    if ($targetSubs.Count -eq 0) { Write-Warn '没有可扫描的订阅。'; return $true }
+
+    Write-Host ''
+    Write-Host '将扫描以下订阅：'
+    foreach ($sub in $targetSubs) {
+        Write-Host ("  {0} | {1}" -f (Get-Prop $sub 'name'), (Get-Prop $sub 'id'))
+    }
+    if (-not (Confirm-Execution "将扫描 $($targetSubs.Count) 个订阅下所有 Foundry 账户和项目")) { return $true }
+
+    $syntheticRows = New-Object System.Collections.Generic.List[object]
+    foreach ($sub in $targetSubs) {
+        $subId = [string](Get-Prop $sub 'id')
+        $subName = [string](Get-Prop $sub 'name')
+        Write-Info "扫描订阅 '$subName'（$subId）"
+        $foundryAccounts = $null
+        try {
+            $foundryAccounts = @(Invoke-AzJson -Arguments @('cognitiveservices', 'account', 'list', '--subscription', $subId)) | Where-Object { ([string](Get-Prop $_ 'kind')) -eq 'AIServices' }
+        }
+        catch {
+            Write-Warn "  扫描订阅 '$subName' 失败：$($_.Exception.Message)"
+            continue
+        }
+        if (@($foundryAccounts).Count -eq 0) { Write-Warn "  订阅 '$subName' 下没有找到 Foundry（AIServices）账户。"; continue }
+
+        foreach ($account in $foundryAccounts) {
+            $acctName = [string](Get-Prop $account 'name')
+            $acctRg = [string](Get-Prop $account 'resourceGroup')
+            $acctLocation = [string](Get-Prop $account 'location')
+            # 用原始 ARM REST 调用而不是 `az cognitiveservices account project list`，
+            # 因为该子命令需要较新版本的 az CLI 才支持，旧版本会报 "misspelled or not recognized"。
+            $encodedRg = [uri]::EscapeDataString($acctRg)
+            $encodedAccount = [uri]::EscapeDataString($acctName)
+            $projectsUrl = "https://management.azure.com/subscriptions/$subId/resourceGroups/$encodedRg/providers/Microsoft.CognitiveServices/accounts/$encodedAccount/projects?api-version=2025-06-01"
+            $projectsResult = Invoke-AzRest -Method 'GET' -Url $projectsUrl
+            if ($projectsResult.ExitCode -ne 0) {
+                Write-Warn "  读取账户 '$acctName' 的项目列表失败：$($projectsResult.Text)"
+                continue
+            }
+            $projects = $null
+            try {
+                $projects = @((($projectsResult.Text | ConvertFrom-Json).value))
+            }
+            catch {
+                Write-Warn "  解析账户 '$acctName' 的项目列表失败：$($_.Exception.Message)"
+                continue
+            }
+            if (@($projects).Count -eq 0) {
+                # 未启用 Foundry 项目管理（常见于旧版 Azure OpenAI 门户创建的账户），仍按账户级导出 Endpoint/Key，ProjectName 留空。
+                Write-Info "  账户 '$acctName' 未启用 Foundry 项目管理（无 Project 子资源），按账户级导出。"
+                $syntheticRows.Add([pscustomobject]@{
+                        SubscriptionName    = $subName
+                        SubscriptionId      = $subId
+                        ResourceGroupName   = $acctRg
+                        FoundryResourceName = $acctName
+                        DefaultProjectName  = ''
+                        Location            = $acctLocation
+                    })
+                continue
+            }
+
+            foreach ($project in $projects) {
+                $projectName = [string](Get-Prop $project 'name')
+                $syntheticRows.Add([pscustomobject]@{
+                        SubscriptionName    = $subName
+                        SubscriptionId      = $subId
+                        ResourceGroupName   = $acctRg
+                        FoundryResourceName = $acctName
+                        DefaultProjectName  = $projectName
+                        Location            = $acctLocation
+                    })
+            }
+        }
+    }
+
+    if ($syntheticRows.Count -eq 0) { Write-Warn '没有发现任何 Foundry 项目。'; return $true }
+    Save-DeliveryReport -Rows $syntheticRows.ToArray() -Accounts $allSubs -NamePrefix 'foundry_endpoints_scan'
+    $true
+}
+
+function Invoke-StageExportCredentials {
+    Write-Info '========== 阶段：导出 Foundry Endpoint 与 API Key =========='
+    if ($DryRun) { Write-Warn '预演模式不支持导出交付清单，请使用正式模式运行此阶段。'; return $true }
+
+    Write-Host ''
+    Write-Host '请选择导出范围：'
+    Write-Host '  1) 仅导出当前 CSV 计划中的项目（阶段 3 覆盖范围，用于补导出忘记导出的 Key）'
+    Write-Host '  2) 导出 CSV 订阅列表中所有 Foundry 账户/项目（全量盘点，自动发现资源组/账户/项目）'
+    $choice = Read-Host '请输入选项'
+    switch ($choice) {
+        '1' { Invoke-ExportFromPlan }
+        '2' { Invoke-ExportFullScan }
+        default { throw "无效选项：$choice" }
+    }
+}
+
 # ==================== 交互菜单与入口 ====================
 
 function Show-Menu {
@@ -1076,7 +1234,8 @@ function Show-Menu {
     Write-Host '  2) 创建 Foundry 服务和 Foundry 项目'
     Write-Host '  3) 批量部署模型（按剩余配额）'
     Write-Host '  4) 批量扩容已有部署配额'
-    Write-Host '  5) 全流程（1 -> 2 -> 3）'
+    Write-Host '  5) 导出 Foundry Endpoint 与 API Key（补导出 / 全量盘点）'
+    Write-Host '  6) 全流程（1 -> 2 -> 3）'
     Write-Host '  0) 退出'
     Write-Host ''
     $choice = Read-Host '请选择要执行的阶段'
@@ -1085,7 +1244,8 @@ function Show-Menu {
         '2' { 'CreateFoundry' }
         '3' { 'DeployModels' }
         '4' { 'ScaleUpQuota' }
-        '5' { 'All' }
+        '5' { 'ExportCredentials' }
+        '6' { 'All' }
         '0' { '' }
         default { throw "无效选项：$choice" }
     }
@@ -1107,13 +1267,23 @@ try {
     $modeText = if ($DryRun) { '预演模式（DryRun）' } else { '正式模式（Live）' }
     Write-Info "运行模式：$modeText"
 
-    Invoke-AzLogin
+    if ($SkipLogin) {
+        Write-Info '已跳过内置登录（-SkipLogin），使用当前终端已有的 Azure CLI 会话。'
+        $currentTenant = [string](Invoke-AzRaw -Arguments @('account', 'show', '--query', 'tenantId', '-o', 'tsv', '--only-show-errors')).Text.Trim()
+        if ($currentTenant.ToLowerInvariant() -ne $TenantId.ToLowerInvariant()) {
+            throw "当前已登录会话的租户（$currentTenant）与 -TenantId（$TenantId）不一致，请先用正确的租户登录，或去掉 -SkipLogin 让脚本自动登录。"
+        }
+    }
+    else {
+        Invoke-AzLogin
+    }
 
     $success = switch ($selected) {
         'CreateSubscription' { Invoke-StageCreateSubscription }
         'CreateFoundry' { Invoke-StageCreateFoundry }
         'DeployModels' { Invoke-StageDeployModels }
         'ScaleUpQuota' { Invoke-StageScaleUpQuota }
+        'ExportCredentials' { Invoke-StageExportCredentials }
         'All' {
             $r1 = Invoke-StageCreateSubscription
             $r2 = Invoke-StageCreateFoundry

@@ -2,11 +2,12 @@
 # ============================================================================
 # Azure Foundry AI 一站式全生命周期统一脚本（Bash 版）
 #
-# 四个阶段的参数全部来自同一个 CSV，避免在多个脚本中重复维护配置：
+# 五个自动化阶段的参数全部来自同一个 CSV：
 #   1) 创建 Azure 订阅（回填 SubscriptionId）—— 仅限 EA 企业协议订阅，CSP 订阅请勿运行
 #   2) 创建 Foundry 服务和 Foundry 项目
 #   3) 按剩余配额批量部署模型
 #   4) 把已有部署的容量扩到剩余配额上限
+#   5) 导出 Foundry Endpoint 与 API Key（补导出 / 全量盘点，任意时间可独立运行）
 #
 # 不带 --stage 参数运行时进入交互式菜单。
 #
@@ -24,7 +25,7 @@ fi
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.0.3"
+SCRIPT_VERSION="1.0.4"
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 TENANT_ID=""
@@ -33,6 +34,7 @@ OUTPUT_ROOT="$SCRIPT_DIR"
 STAGE=""
 DRY_RUN=false
 BROWSER_LOGIN=false
+SKIP_LOGIN=false
 CREATE_DELAY_SECONDS=10
 CREATE_DELAY_EXPLICIT=false
 
@@ -60,6 +62,9 @@ usage() {
   bash Azure_Foundry_AI_Automation.sh --tenant-id <TENANT-ID> --stage All --dry-run
   bash Azure_Foundry_AI_Automation.sh --tenant-id <TENANT-ID> --stage All
 
+  # 5. 导出 Foundry Endpoint 与 API Key（任意时间独立运行）：
+  bash Azure_Foundry_AI_Automation.sh --tenant-id <TENANT-ID> --stage ExportCredentials
+
 参数：
   --tenant-id GUID   客户 Microsoft Entra 租户 ID。必填。
   --stage NAME       指定阶段，省略时进入交互式菜单。可选值：
@@ -67,6 +72,7 @@ usage() {
                        CreateFoundry       阶段 2：创建资源组、Foundry 服务和 Foundry 项目
                        DeployModels        阶段 3：按剩余配额批量部署 CSV 中的模型
                        ScaleUpQuota        阶段 4：把已有部署的容量扩到剩余配额上限
+                       ExportCredentials   阶段 5：导出 Foundry Endpoint 与 API Key（补导出 / 全量盘点，两种模式交互选择）
                        All                 全流程：依次执行前三个阶段（1 -> 2 -> 3），阶段 1 同样仅限 EA
 
 【EA / CSP 提示】阶段 1（含 All 内的阶段 1）通过 Microsoft.Subscription/aliases API 自助创建订阅，
@@ -80,6 +86,12 @@ usage() {
                      不指定时按待创建数量自动选择：<=20 个用 10 秒，21-50 个用 20 秒，>50 个用 30 秒。
   --dry-run          只显示将执行的动作，不创建或修改任何 Azure 资源。
   --browser-login    使用浏览器登录；默认使用设备码登录。
+                     若登录时报错 53003（Entra 条件访问策略拦截，常见提示为 "Block device code flow"），
+                     优先尝试加上本开关改用浏览器登录，通常无需联系客户管理员调整任何策略即可解决。
+                     注意：只要还在用这个租户，之后每一次运行本脚本都要带上这个开关，不是登录一次就一直有效。
+  --skip-login       跳过脚本内置的 az login，使用当前终端已有的登录会话（如客户要求预先用服务主体登录）。
+                     仅当 --browser-login 也被条件访问策略拦截时才需要考虑这个更复杂的方案。
+                     跳过后仍会校验当前会话的租户是否与 --tenant-id 一致，不一致会报错退出。
   --version          显示脚本版本。
   --help             显示本帮助。
 
@@ -102,6 +114,7 @@ while (($#)); do
     --create-delay) CREATE_DELAY_SECONDS="${2:-10}"; CREATE_DELAY_EXPLICIT=true; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
     --browser-login) BROWSER_LOGIN=true; shift ;;
+    --skip-login) SKIP_LOGIN=true; shift ;;
     --version) printf 'Azure Foundry AI Automation v%s\n' "$SCRIPT_VERSION"; exit 0 ;;
     --help|-h) usage; exit 0 ;;
     *) echo "未知参数：$1" >&2; usage >&2; exit 2 ;;
@@ -565,16 +578,22 @@ set_deployment() {
 
 # 三个端点共用账户级 key1，主机名由自定义子域决定。
 get_account_endpoints() {
-  local row_json="$1" sub_domain project
+  local row_json="$1" sub_domain project project_ep
   project=$(csv_field "$row_json" 'DefaultProjectName')
   sub_domain=$(az_json cognitiveservices account show \
     --resource-group "$(csv_field "$row_json" 'ResourceGroupName')" \
     --name "$(csv_field "$row_json" 'FoundryResourceName')" 2>/dev/null |
     jq -r '.properties.customSubDomainName // ""')
   [[ -z "$sub_domain" ]] && sub_domain=$(csv_field "$row_json" 'FoundryResourceName' | tr '[:upper:]' '[:lower:]')
+  # 账户级导出（未启用 Foundry 项目管理）时 project 为空，不拼接残缺的 ProjectEndpoint。
+  if [[ -z "$project" ]]; then
+    project_ep=""
+  else
+    project_ep="https://${sub_domain}.services.ai.azure.com/api/projects/${project}"
+  fi
   printf '%s\t%s\t%s' \
     "https://${sub_domain}.openai.azure.com/" \
-    "https://${sub_domain}.services.ai.azure.com/api/projects/${project}" \
+    "$project_ep" \
     "https://${sub_domain}.cognitiveservices.azure.com/"
 }
 
@@ -606,7 +625,7 @@ EOF
 
 # 按 订阅 + Foundry 账户 + 项目 去重，每个项目输出一行。
 save_delivery_report() {
-  local rows_file="$1"
+  local rows_file="$1" name_prefix="${2:-foundry_endpoints}"
   [[ "$DRY_RUN" == true ]] && { log_info '预演模式不生成交付清单。'; return 0; }
 
   local include_key=false
@@ -621,7 +640,7 @@ save_delivery_report() {
   mkdir -p "$delivery_dir"
   local suffix=""
   [[ "$include_key" == true ]] && suffix="_WITH_KEY"
-  local report_file="$delivery_dir/foundry_endpoints_${RUN_ID}${suffix}.csv"
+  local report_file="$delivery_dir/${name_prefix}_${RUN_ID}${suffix}.csv"
   local rows_tsv="$TEMP_DIR/delivery_rows.tsv"
   : > "$rows_tsv"
 
@@ -1274,6 +1293,189 @@ stage_scale_up_quota() {
   return $ok
 }
 
+# ==================== 阶段 5：导出 Endpoint 与 API Key ====================
+
+# 只接受合法 GUID 格式的 SubscriptionId，格式错误或为空的行跳过而不中断整体读取。
+# 输出格式：每行 "ID:<subId>"（有效订阅）或 "WARN:<提示文本>"（需要转给 log_warn）或 "ERR:<错误文本>"。
+get_csv_subscription_ids() {
+  python3 - "$CSV_PATH" <<'PY'
+import csv, sys, uuid
+
+csv_path = sys.argv[1]
+seen = set()
+
+try:
+    with open(csv_path, encoding='utf-8-sig', newline='') as handle:
+        reader = csv.DictReader(handle)
+        rows = list(reader)
+except FileNotFoundError:
+    print(f"ERR:CSV 文件不存在：{csv_path}")
+    sys.exit(0)
+
+for index, row in enumerate(rows, start=2):
+    raw = (row.get('SubscriptionId') or '')
+    trimmed = raw.strip()
+    if not trimmed:
+        continue
+    if trimmed != raw:
+        print(f"WARN:第 {index} 行：SubscriptionId 存在首尾空格，已自动去除后使用：'{trimmed}'")
+    try:
+        uuid.UUID(trimmed)
+    except ValueError:
+        print(f"WARN:第 {index} 行：SubscriptionId '{trimmed}' 不是合法 GUID 格式，已跳过。")
+        continue
+    lower = trimmed.lower()
+    if lower not in seen:
+        seen.add(lower)
+        print(f"ID:{lower}")
+PY
+}
+
+# 模式 1：直接复用阶段 3 的 CSV 行，用于忘记在阶段 3 导出 Key 时补导出。
+export_from_plan() {
+  local rows_file="$TEMP_DIR/rows_export_plan.jsonl"
+  load_plan 'DeployModels' > "$rows_file"
+  load_account_list
+  save_delivery_report "$rows_file"
+}
+
+# 模式 2：只信任 CSV 里明确列出的 SubscriptionId，账户和项目全部自动发现，避免跨订阅/跨部门误导出。
+export_full_scan() {
+  local ids=() line
+  while IFS= read -r line; do
+    case "$line" in
+      WARN:*) log_warn "  ${line#WARN:}" ;;
+      ERR:*) log_error "${line#ERR:}"; return 1 ;;
+      ID:*) ids+=("${line#ID:}") ;;
+    esac
+  done < <(get_csv_subscription_ids)
+
+  if [[ ${#ids[@]} -eq 0 ]]; then
+    log_error 'CSV 中没有填写任何合法的 SubscriptionId，无法执行全量盘点。'
+    return 1
+  fi
+
+  load_account_list
+  local target_ids=() target_names=()
+  local id
+  for id in "${ids[@]}"; do
+    local match actual_tenant actual_state actual_name
+    match=$(printf '%s' "$ACCOUNT_LIST_JSON" | jq -c --arg id "$id" \
+      'map(select((.id // "" | ascii_downcase) == $id)) | .[0] // empty')
+    if [[ -z "$match" ]]; then
+      log_warn "订阅 '$id' 当前登录账号不可见，或未启用，已跳过。"
+      continue
+    fi
+    actual_tenant=$(printf '%s' "$match" | jq -r '.tenantId // ""' | tr '[:upper:]' '[:lower:]')
+    actual_state=$(printf '%s' "$match" | jq -r '.state // ""')
+    if [[ "$actual_tenant" != "$(printf '%s' "$TENANT_ID" | tr '[:upper:]' '[:lower:]')" || "$actual_state" != "Enabled" ]]; then
+      log_warn "订阅 '$id' 不属于租户 ${TENANT_ID}，或未启用，已跳过。"
+      continue
+    fi
+    actual_name=$(printf '%s' "$match" | jq -r '.name // ""')
+    target_ids+=("$id")
+    target_names+=("$actual_name")
+  done
+
+  if [[ ${#target_ids[@]} -eq 0 ]]; then
+    log_warn '没有可扫描的订阅。'
+    return 0
+  fi
+
+  echo '' >&2
+  echo '将扫描以下订阅：' >&2
+  local i
+  for ((i = 0; i < ${#target_ids[@]}; i++)); do
+    printf '  %s | %s\n' "${target_names[$i]}" "${target_ids[$i]}" >&2
+  done
+  confirm_execution "将扫描 ${#target_ids[@]} 个订阅下所有 Foundry 账户和项目" || return 0
+
+  local rows_file="$TEMP_DIR/rows_export_scan.jsonl"
+  : > "$rows_file"
+
+  for ((i = 0; i < ${#target_ids[@]}; i++)); do
+    local sub_id="${target_ids[$i]}" sub_name="${target_names[$i]}"
+    log_info "扫描订阅 '$sub_name'（${sub_id}）"
+
+    local accounts_json=""
+    if ! accounts_json=$(az_json cognitiveservices account list --subscription "$sub_id" 2>"$TEMP_DIR/scan.err"); then
+      log_warn "  扫描订阅 '$sub_name' 失败：$(tr '\n' ' ' < "$TEMP_DIR/scan.err")"
+      continue
+    fi
+    local foundry_accounts=""
+    foundry_accounts=$(printf '%s' "$accounts_json" | jq -c '.[] | select(.kind == "AIServices")')
+    if [[ -z "$foundry_accounts" ]]; then
+      log_warn "  订阅 '$sub_name' 下没有找到 Foundry（AIServices）账户。"
+      continue
+    fi
+
+    local account_json
+    while IFS= read -r account_json; do
+      [[ -z "$account_json" ]] && continue
+      local acct_name acct_rg acct_location
+      acct_name=$(printf '%s' "$account_json" | jq -r '.name // ""')
+      acct_rg=$(printf '%s' "$account_json" | jq -r '.resourceGroup // ""')
+      acct_location=$(printf '%s' "$account_json" | jq -r '.location // ""')
+
+      # 用原始 ARM REST 调用而不是 `az cognitiveservices account project list`，
+      # 因为该子命令需要较新版本的 az CLI 才支持，旧版本会报 "misspelled or not recognized"。
+      local encoded_rg encoded_account projects_url projects_json
+      encoded_rg=$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$acct_rg")
+      encoded_account=$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$acct_name")
+      projects_url="https://management.azure.com/subscriptions/${sub_id}/resourceGroups/${encoded_rg}/providers/Microsoft.CognitiveServices/accounts/${encoded_account}/projects?api-version=2025-06-01"
+
+      if ! projects_json=$(az_rest GET "$projects_url" 2>"$TEMP_DIR/scan.err"); then
+        log_warn "  读取账户 '$acct_name' 的项目列表失败：$(tr '\n' ' ' < "$TEMP_DIR/scan.err")"
+        continue
+      fi
+
+      local project_names
+      project_names=$(printf '%s' "$projects_json" | jq -r '.value // [] | .[].name')
+      if [[ -z "$project_names" ]]; then
+        # 未启用 Foundry 项目管理（常见于旧版 Azure OpenAI 门户创建的账户），仍按账户级导出 Endpoint/Key，ProjectName 留空。
+        log_info "  账户 '$acct_name' 未启用 Foundry 项目管理（无 Project 子资源），按账户级导出。"
+        jq -cn --arg subName "$sub_name" --arg subId "$sub_id" --arg rg "$acct_rg" --arg foundry "$acct_name" --arg loc "$acct_location" \
+          '{SubscriptionName:$subName, SubscriptionId:$subId, ResourceGroupName:$rg, FoundryResourceName:$foundry, DefaultProjectName:"", Location:$loc}' >> "$rows_file"
+        continue
+      fi
+
+      local project_name
+      while IFS= read -r project_name; do
+        [[ -z "$project_name" ]] && continue
+        jq -cn --arg subName "$sub_name" --arg subId "$sub_id" --arg rg "$acct_rg" --arg foundry "$acct_name" --arg proj "$project_name" --arg loc "$acct_location" \
+          '{SubscriptionName:$subName, SubscriptionId:$subId, ResourceGroupName:$rg, FoundryResourceName:$foundry, DefaultProjectName:$proj, Location:$loc}' >> "$rows_file"
+      done <<< "$project_names"
+    done <<< "$foundry_accounts"
+  done
+
+  if [[ ! -s "$rows_file" ]]; then
+    log_warn '没有发现任何 Foundry 项目。'
+    return 0
+  fi
+  save_delivery_report "$rows_file" 'foundry_endpoints_scan'
+}
+
+stage_export_credentials() {
+  log_info '========== 阶段：导出 Foundry Endpoint 与 API Key =========='
+  if [[ "$DRY_RUN" == true ]]; then
+    log_warn '预演模式不支持导出交付清单，请使用正式模式运行此阶段。'
+    return 0
+  fi
+
+  echo '' >&2
+  echo '请选择导出范围：' >&2
+  echo '  1) 仅导出当前 CSV 计划中的项目（阶段 3 覆盖范围，用于补导出忘记导出的 Key）' >&2
+  echo '  2) 导出 CSV 订阅列表中所有 Foundry 账户/项目（全量盘点，自动发现资源组/账户/项目）' >&2
+  printf '请输入选项：' >&2
+  local choice
+  IFS= read -r choice
+  case "$choice" in
+    1) export_from_plan ;;
+    2) export_full_scan ;;
+    *) echo "无效选项：$choice" >&2; return 2 ;;
+  esac
+}
+
 # ==================== 交互菜单与入口 ====================
 
 show_menu() {
@@ -1284,7 +1486,8 @@ show_menu() {
   2) 创建 Foundry 服务和 Foundry 项目
   3) 批量部署模型（按剩余配额）
   4) 批量扩容已有部署配额
-  5) 全流程（1 -> 2 -> 3）
+  5) 导出 Foundry Endpoint 与 API Key（补导出 / 全量盘点）
+  6) 全流程（1 -> 2 -> 3）
   0) 退出
 
 EOF
@@ -1296,7 +1499,8 @@ EOF
     2) printf 'CreateFoundry' ;;
     3) printf 'DeployModels' ;;
     4) printf 'ScaleUpQuota' ;;
-    5) printf 'All' ;;
+    5) printf 'ExportCredentials' ;;
+    6) printf 'All' ;;
     0) printf '' ;;
     *) echo "无效选项：$choice" >&2; exit 2 ;;
   esac
@@ -1315,7 +1519,16 @@ else
   log_info "运行模式：正式模式（Live）"
 fi
 
-azure_login
+if [[ "$SKIP_LOGIN" == true ]]; then
+  log_info "已跳过内置登录（--skip-login），使用当前终端已有的 Azure CLI 会话。"
+  CURRENT_TENANT=$(az account show --query tenantId -o tsv --only-show-errors 2>/dev/null || true)
+  if [[ "$(printf '%s' "$CURRENT_TENANT" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$TENANT_ID" | tr '[:upper:]' '[:lower:]')" ]]; then
+    echo "当前已登录会话的租户（${CURRENT_TENANT}）与 --tenant-id（${TENANT_ID}）不一致，请先用正确的租户登录，或去掉 --skip-login 让脚本自动登录。" >&2
+    exit 2
+  fi
+else
+  azure_login
+fi
 
 EXIT_CODE=0
 case "$STAGE" in
@@ -1323,6 +1536,7 @@ case "$STAGE" in
   CreateFoundry) stage_create_foundry || EXIT_CODE=1 ;;
   DeployModels) stage_deploy_models || EXIT_CODE=1 ;;
   ScaleUpQuota) stage_scale_up_quota || EXIT_CODE=1 ;;
+  ExportCredentials) stage_export_credentials || EXIT_CODE=1 ;;
   All)
     stage_create_subscription || EXIT_CODE=1
     stage_create_foundry || EXIT_CODE=1

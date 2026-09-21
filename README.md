@@ -1,26 +1,27 @@
 # Azure Foundry AI Automation
 
-当前版本：`v1.0.3` · [更新记录](CHANGELOG.md)
+当前版本：`v1.0.4` · [更新记录](CHANGELOG.md)
 
 用于 Azure Foundry AI 生命周期自动化的 Bash 和 PowerShell 脚本集合，支持订阅准备、Foundry 资源创建、按剩余配额批量部署模型，以及将已有部署扩容至可用配额上限。
 
 请在本地填写 CSV 配置。CSV、日志和交付清单可能包含订阅、计费和凭据信息，请勿提交到任何公开仓库，也不要通过不安全的渠道传递。
 
-把原来四个独立脚本合并为一个，所有参数集中在同一个 CSV 中维护：
+工具支持以下自动化阶段，部署参数集中在同一个 CSV 中维护：
 
-| 阶段 | 作用 | 对应原脚本 |
-|---|---|---|
-| `CreateSubscription` | 在 EA Enrollment Account 下创建订阅，并回填 `SubscriptionId`【**仅限 EA 企业协议订阅**，见下方提示】 | `create_ea_subscriptions_from_csv` |
-| `CreateFoundry` | 创建资源组、Foundry 服务（AIServices）和 Foundry 默认项目 | `provision_foundry_from_csv` |
-| `DeployModels` | 按剩余配额批量部署模型，执行完成后自动生成交付清单（含 `OpenAIEndpoint`/`ProjectEndpoint`/`ServicesEndpoint` 三个 Endpoint，以及可选的 API Key），详见下方[交付清单](#交付清单阶段-3-自动生成) | `Azure_Foundry_AI_batch_deploy` |
-| `ScaleUpQuota` | 把已有部署的容量扩到剩余配额上限 | `Azure_Foundry_AI_scale_up` |
+| 阶段 | 作用 |
+|---|---|
+| `CreateSubscription` | 在 EA Enrollment Account 下创建订阅，并回填 `SubscriptionId`【**仅限 EA 企业协议订阅**，见下方提示】 |
+| `CreateFoundry` | 创建资源组、Foundry 服务（AIServices）和 Foundry 默认项目 |
+| `DeployModels` | 按剩余配额批量部署模型，执行完成后自动生成交付清单（含 `OpenAIEndpoint`/`ProjectEndpoint`/`ServicesEndpoint` 三个 Endpoint，以及可选的 API Key），详见下方[交付清单](#交付清单阶段-3-自动生成) |
+| `ScaleUpQuota` | 把已有部署的容量扩到剩余配额上限 |
+| `ExportCredentials` | 导出 Foundry Endpoint 与 API Key，交互选择仅导出 CSV 计划中的项目还是按 CSV 订阅列表全量盘点 |
 
 ## 开始前必读
 
 ### ⚠️ 阶段 1 的适用范围
 
 - 阶段 1 `CreateSubscription` 仅适用于 **EA 企业协议订阅**。
-- 如果您的订阅由 CSP 合作伙伴管理，请不要运行阶段 1，也不要运行菜单选项 5“全流程”。
+- 如果您的订阅由 CSP 合作伙伴管理，请不要运行阶段 1，也不要运行菜单选项 6“全流程”。
 - 请先联系合作伙伴创建订阅，将获得的 `SubscriptionId` 填入 CSV，然后直接从阶段 2 `CreateFoundry` 开始执行。
 - 如果无法确认协议类型，请先联系贵司 Azure 管理员或服务合作伙伴。
 - 正式运行阶段 1 时，脚本会要求输入大写 `EA` 进行二次确认；预演模式会自动跳过该确认。
@@ -235,7 +236,7 @@ gpt-5.6-sol-dz=gpt-5.6-sol:::DataZoneStandard  自定义部署名 + 单独指定
 ## 注意事项（常见问题与规避）
 
 1. **阶段 1 仅限 EA 企业协议订阅，CSP 合作伙伴管理的订阅请勿运行**：
-   - `CreateSubscription`（包括菜单选项 1 以及菜单选项 5“全流程”里的阶段 1）只适用于 EA 企业协议订阅。
+   - `CreateSubscription`（包括菜单选项 1 以及菜单选项 6“全流程”里的阶段 1）只适用于 EA 企业协议订阅。
    - 如果您的订阅由 CSP 合作伙伴管理，请不要运行阶段 1；请先联系合作伙伴创建订阅，并将获得的 `SubscriptionId` 填入 CSV，然后直接从阶段 2（`CreateFoundry`）开始执行。
    - 运行前如无法确认协议类型，请联系贵司 Azure 管理员或服务合作伙伴。
    - 脚本在进入阶段 1 时会先输出警告并要求额外输入大写 `EA` 确认（预演模式下自动跳过确认），但仍需在交付前先口头/文档告知清楚，避免误运行后因权限不足报错。
@@ -280,15 +281,17 @@ proj-<workload>-<env>-<region>
 
 ### 方式一：交互式菜单（推荐）
 
-不带 `-Stage` / `--stage` 时进入菜单选择阶段：
+不带 `-Stage` / `--stage` 时进入菜单选择阶段。推荐在条件访问策略较严格的租户中使用浏览器登录：
 
 ```powershell
-.\Azure_Foundry_AI_Automation.ps1 -TenantId "<TENANT-ID>"
+.\Azure_Foundry_AI_Automation.ps1 -TenantId "<TENANT-ID>" -BrowserLogin
 ```
 
 ```bash
-bash Azure_Foundry_AI_Automation.sh --tenant-id "<TENANT-ID>"
+bash Azure_Foundry_AI_Automation.sh --tenant-id "<TENANT-ID>" --browser-login
 ```
+
+不加 `-BrowserLogin` / `--browser-login` 时，脚本默认使用设备代码登录。如果客户租户启用了阻止设备代码流的条件访问策略，登录会失败并返回 `53003`；此时每次运行都应加上浏览器登录参数。
 
 菜单项：
 
@@ -297,7 +300,8 @@ bash Azure_Foundry_AI_Automation.sh --tenant-id "<TENANT-ID>"
 2) 创建 Foundry 服务和 Foundry 项目
 3) 批量部署模型（按剩余配额）
 4) 批量扩容已有部署配额
-5) 全流程（1 -> 2 -> 3）
+5) 导出 Foundry Endpoint 与 API Key（补导出 / 全量盘点）
+6) 全流程（1 -> 2 -> 3）
 0) 退出
 ```
 
@@ -379,7 +383,34 @@ bash Azure_Foundry_AI_Automation.sh --tenant-id "<TENANT-ID>" --stage ScaleUpQuo
 bash Azure_Foundry_AI_Automation.sh --tenant-id "<TENANT-ID>" --stage ScaleUpQuota
 ```
 
-#### 菜单选项 5：全流程自动化（阶段 1 -> 阶段 2 -> 阶段 3）
+#### 阶段 5：导出 Foundry Endpoint 与 API Key
+> 用于补充阶段 3 结束时忘记输入大写 `KEY` 导致没导出密钥的情况，也可以用于一次性盘点多个 Foundry 账户/项目。不支持 `-DryRun`/`--dry-run`（预演模式会直接跳过）。
+
+运行后会交互询问导出范围：
+
+```text
+请选择导出范围：
+  1) 仅导出当前 CSV 计划中的项目（阶段 3 覆盖范围，用于补导出忘记导出的 Key）
+  2) 导出 CSV 订阅列表中所有 Foundry 账户/项目（全量盘点，自动发现资源组/账户/项目）
+```
+
+- **选项 1**：直接复用阶段 3 的 CSV 行，实时查 Azure 重新生成交付清单，文件名与阶段 3 自动生成的一致（`foundry_endpoints_<时间戳>[_WITH_KEY].csv`）。
+- **选项 2**：**只信任 CSV 中明确填写的 `SubscriptionId` 列**，不会扩展到当前登录账号可见的其他订阅，避免跨部门/跨订阅误导出。资源组、Foundry 账户名、项目名都不需要在 CSV 中填写，脚本会自动扫描该订阅下所有 `kind=AIServices` 的账户及其下所有项目。格式错误、空白、非法 GUID 的 `SubscriptionId` 行会被跳过并提示，不会中断整体流程。输出文件名为 `foundry_endpoints_scan_<时间戳>[_WITH_KEY].csv`。
+  - 若账户未启用 Foundry 项目管理（常见于旧版 Azure OpenAI 门户创建的账户，底下没有任何 Project 子资源），仍会按**账户级**导出 Endpoint/部署/API Key，只是该行的 `ProjectName`/`ProjectEndpoint` 两列留空，不会因为没有 Project 而被跳过。
+
+两种模式都会再次询问是否包含 API Key（默认不包含）。
+
+```powershell
+# 正式执行（交互选择导出范围）
+.\Azure_Foundry_AI_Automation.ps1 -TenantId "<TENANT-ID>" -Stage ExportCredentials
+```
+
+```bash
+# 正式执行（交互选择导出范围）
+bash Azure_Foundry_AI_Automation.sh --tenant-id "<TENANT-ID>" --stage ExportCredentials
+```
+
+#### 菜单选项 6：全流程自动化（阶段 1 -> 阶段 2 -> 阶段 3）
 > 一键串联：从空白 CSV 创建订阅 -> 自动回填 -> 创建 Foundry 资源 -> 批量部署模型。
 > 仅适用于 EA 企业协议订阅；CSP 合作伙伴管理的订阅请跳过本选项，直接运行阶段 2。
 
@@ -457,9 +488,43 @@ results/stage3_model_deployment_<时间戳>.csv
 results/stage4_quota_scale_up_<时间戳>.csv
 delivery_reports/foundry_endpoints_<时间戳>.csv
 delivery_reports/foundry_endpoints_<时间戳>_WITH_KEY.csv
+delivery_reports/foundry_endpoints_scan_<时间戳>.csv
+delivery_reports/foundry_endpoints_scan_<时间戳>_WITH_KEY.csv
 ```
 
 ## 常见问题
+
+`53003 BlockedByConditionalAccess`：运行 `az login` 时浏览器提示"You don't have access to this"，登录本身成功但被拦截。这是**客户租户的 Microsoft Entra 条件访问策略（Conditional Access）在服务器端拦截了这次登录**，不是本地 Azure CLI 或本脚本的配置问题，本地无法绕过。常见触发原因：
+
+- 条件访问策略限制了可用的客户端应用（例如禁止 "Microsoft Azure CLI"，App Id `04b07795-8ddb-461a-bbee-02f9e1bf7b46`）。
+- **最常见的一种：策略专门阻止"设备代码流"（`Microsoft-managed: Block device code flow`），而脚本默认走的正是这种登录方式。** 登录失败页面上的"Conditional access"标签页会直接显示是哪条策略、`Result: Failure`。
+- 要求登录设备必须是"合规设备"或"已加入 Entra 域"，而测试机器未注册（错误页面上的 `Device state: Unregistered`）。
+- 限制了登录的地理位置或网络。
+
+**第一步，先试最简单的：加 `-BrowserLogin` 改用浏览器登录，通常不需要联系客户管理员改任何策略**：
+
+```powershell
+pwsh -NoProfile -File ./Azure_Foundry_AI_Automation.ps1 -TenantId "<TenantId>" -BrowserLogin
+```
+
+```bash
+bash Azure_Foundry_AI_Automation.sh --tenant-id "<TenantId>" --browser-login
+```
+
+原因：上面列的"阻止设备代码流"策略只针对设备代码流这一种登录方式生效，改成浏览器交互式登录直接绕开，我们实测有效。**⚠️ 注意：这不是登录一次就一直有效——脚本每次运行都会重新触发一次登录，只要还在用这个租户测试，之后每一条命令都要带上 `-BrowserLogin`，忘了加还是会报同样的错。**
+
+**如果 `-BrowserLogin` 也被拦（比较少见，说明策略连浏览器登录也限制了）**，才需要按下面的步骤处理：
+
+1. 把错误页面上的 `Correlation Id`、`Request Id`、`Timestamp`、`App Id` 提供给客户租户的 Entra 管理员，让对方在 Entra 管理中心的登录日志里用 `Correlation Id` 精确定位到是哪条条件访问策略拦的。
+2. 请管理员为你的账号/本次测试临时加一条条件访问例外（按账号、按应用或按设备），或者临时把 "Microsoft Azure CLI" 加入允许列表。
+3. 如果例外配置比较麻烦，也可以改用**服务主体（Service Principal）登录**，通常不受"设备合规性/已注册设备"这类条件访问规则限制：请客户的 Entra 管理员创建一个 App Registration + Service Principal，分配刚好够用的 RBAC 角色（`Cognitive Services Contributor`），通过安全渠道把 `Application (client) ID`、`Client Secret`（或证书）、`Tenant ID` 提供给你，然后：
+   ```bash
+   az login --service-principal -u "<ApplicationId>" -p "<ClientSecretOrCertPath>" --tenant "<TenantId>"
+   pwsh -NoProfile -File ./Azure_Foundry_AI_Automation.ps1 -TenantId "<TenantId>" -SkipLogin
+   # 或 Bash 版本：
+   bash Azure_Foundry_AI_Automation.sh --tenant-id "<TenantId>" --skip-login
+   ```
+   脚本会校验当前会话的租户是否与 `-TenantId`/`--tenant-id` 一致，不一致会直接报错退出，避免误操作到错误租户。
 
 `CustomDomainInUse`：`FoundryResourceName` 已被全局占用，换一个更唯一的名称后重跑。
 
