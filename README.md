@@ -1,8 +1,8 @@
 # Azure Foundry AI Automation
 
-当前版本：`v1.0.4` · [更新记录](CHANGELOG.md)
+当前版本：`v1.0.5` · [更新记录](CHANGELOG.md)
 
-用于 Azure Foundry AI 生命周期自动化的 Bash 和 PowerShell 脚本集合，支持订阅准备、Foundry 资源创建、按剩余配额批量部署模型，以及将已有部署扩容至可用配额上限。
+用于 Azure Foundry AI 生命周期自动化的 Bash 和 PowerShell 脚本集合，支持订阅准备、Foundry 资源创建、模型部署与扩容、Endpoint/API Key 导出，以及订阅 Quota Tier 查询。
 
 请在本地填写 CSV 配置。CSV、日志和交付清单可能包含订阅、计费和凭据信息，请勿提交到任何公开仓库，也不要通过不安全的渠道传递。
 
@@ -15,13 +15,14 @@
 | `DeployModels` | 按剩余配额批量部署模型，执行完成后自动生成交付清单（含 `OpenAIEndpoint`/`ProjectEndpoint`/`ServicesEndpoint` 三个 Endpoint，以及可选的 API Key），详见下方[交付清单](#交付清单阶段-3-自动生成) |
 | `ScaleUpQuota` | 把已有部署的容量扩到剩余配额上限 |
 | `ExportCredentials` | 导出 Foundry Endpoint 与 API Key，交互选择仅导出 CSV 计划中的项目还是按 CSV 订阅列表全量盘点 |
+| `QueryQuotaTier` | 查询 CSV 中订阅的 Azure OpenAI Quota Tier，并输出 Tier、分配时间和自动升级策略 |
 
 ## 开始前必读
 
 ### ⚠️ 阶段 1 的适用范围
 
 - 阶段 1 `CreateSubscription` 仅适用于 **EA 企业协议订阅**。
-- 如果您的订阅由 CSP 合作伙伴管理，请不要运行阶段 1，也不要运行菜单选项 6“全流程”。
+- 如果您的订阅由 CSP 合作伙伴管理，请不要运行阶段 1，也不要运行菜单选项 7“全流程”。
 - 请先联系合作伙伴创建订阅，将获得的 `SubscriptionId` 填入 CSV，然后直接从阶段 2 `CreateFoundry` 开始执行。
 - 如果无法确认协议类型，请先联系贵司 Azure 管理员或服务合作伙伴。
 - 正式运行阶段 1 时，脚本会要求输入大写 `EA` 进行二次确认；预演模式会自动跳过该确认。
@@ -236,7 +237,7 @@ gpt-5.6-sol-dz=gpt-5.6-sol:::DataZoneStandard  自定义部署名 + 单独指定
 ## 注意事项（常见问题与规避）
 
 1. **阶段 1 仅限 EA 企业协议订阅，CSP 合作伙伴管理的订阅请勿运行**：
-   - `CreateSubscription`（包括菜单选项 1 以及菜单选项 6“全流程”里的阶段 1）只适用于 EA 企业协议订阅。
+   - `CreateSubscription`（包括菜单选项 1 以及菜单选项 7“全流程”里的阶段 1）只适用于 EA 企业协议订阅。
    - 如果您的订阅由 CSP 合作伙伴管理，请不要运行阶段 1；请先联系合作伙伴创建订阅，并将获得的 `SubscriptionId` 填入 CSV，然后直接从阶段 2（`CreateFoundry`）开始执行。
    - 运行前如无法确认协议类型，请联系贵司 Azure 管理员或服务合作伙伴。
    - 脚本在进入阶段 1 时会先输出警告并要求额外输入大写 `EA` 确认（预演模式下自动跳过确认），但仍需在交付前先口头/文档告知清楚，避免误运行后因权限不足报错。
@@ -301,7 +302,8 @@ bash Azure_Foundry_AI_Automation.sh --tenant-id "<TENANT-ID>" --browser-login
 3) 批量部署模型（按剩余配额）
 4) 批量扩容已有部署配额
 5) 导出 Foundry Endpoint 与 API Key（补导出 / 全量盘点）
-6) 全流程（1 -> 2 -> 3）
+6) 查询 Azure OpenAI Quota Tier
+7) 全流程（1 -> 2 -> 3）
 0) 退出
 ```
 
@@ -410,7 +412,30 @@ bash Azure_Foundry_AI_Automation.sh --tenant-id "<TENANT-ID>" --stage ScaleUpQuo
 bash Azure_Foundry_AI_Automation.sh --tenant-id "<TENANT-ID>" --stage ExportCredentials
 ```
 
-#### 菜单选项 6：全流程自动化（阶段 1 -> 阶段 2 -> 阶段 3）
+#### 阶段 6：查询 Azure OpenAI Quota Tier
+> 只读取 CSV 中非空且格式合法的 `SubscriptionId`，不会扫描当前账号可见的其他订阅。订阅 ID 存在首尾空格时会自动修正，非法 GUID 会警告并跳过，单行错误不影响其他订阅。
+> 查询使用 Microsoft 官方 ARM 控制面预览 API `2025-10-01-preview`；预览 API 的字段和行为可能调整。当前输出字段包括 `QuotaTier`、`AssignmentDate`、`TierUpgradePolicy`、`Status` 和 `ErrorMessage`。
+
+查询前会显示 CSV 中匹配到的订阅，并要求输入大写 `YES` 确认。若订阅不可见、不属于目标租户或未启用，会跳过并给出警告；单个订阅调用失败会写入结果 CSV，同时继续查询其他订阅。
+
+```powershell
+.\Azure_Foundry_AI_Automation.ps1 -TenantId "<TENANT-ID>" -Stage QueryQuotaTier
+```
+
+```bash
+bash Azure_Foundry_AI_Automation.sh --tenant-id "<TENANT-ID>" --stage QueryQuotaTier
+```
+
+结果示例：
+
+```text
+SubscriptionName,SubscriptionId,QuotaTier,AssignmentDate,TierUpgradePolicy,Status,ErrorMessage
+Azure Enterprise-19,00000000-0000-0000-0000-000000000000,Tier 5,2025-10-18T05:09:05.6334222Z,OnceUpgradeIsAvailable,Succeeded,
+```
+
+> 该功能查询的是订阅级 **Quota Tier**，不是区域/模型的当前已分配配额。若 API 未返回记录，结果状态为 `NoData`；若权限不足或预览 API 在目标订阅不可用，状态为 `Failed` 并保留错误信息。
+
+#### 菜单选项 7：全流程自动化（阶段 1 -> 阶段 2 -> 阶段 3）
 > 一键串联：从空白 CSV 创建订阅 -> 自动回填 -> 创建 Foundry 资源 -> 批量部署模型。
 > 仅适用于 EA 企业协议订阅；CSP 合作伙伴管理的订阅请跳过本选项，直接运行阶段 2。
 
@@ -486,6 +511,7 @@ results/stage1_subscription_creation_<时间戳>.csv
 results/stage2_foundry_provisioning_<时间戳>.csv
 results/stage3_model_deployment_<时间戳>.csv
 results/stage4_quota_scale_up_<时间戳>.csv
+results/stage6_subscription_quota_tier_<时间戳>.csv
 delivery_reports/foundry_endpoints_<时间戳>.csv
 delivery_reports/foundry_endpoints_<时间戳>_WITH_KEY.csv
 delivery_reports/foundry_endpoints_scan_<时间戳>.csv

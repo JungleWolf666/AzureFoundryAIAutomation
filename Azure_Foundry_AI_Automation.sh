@@ -2,12 +2,13 @@
 # ============================================================================
 # Azure Foundry AI 一站式全生命周期统一脚本（Bash 版）
 #
-# 五个自动化阶段的参数全部来自同一个 CSV：
+# 六个自动化阶段的参数全部来自同一个 CSV：
 #   1) 创建 Azure 订阅（回填 SubscriptionId）—— 仅限 EA 企业协议订阅，CSP 订阅请勿运行
 #   2) 创建 Foundry 服务和 Foundry 项目
 #   3) 按剩余配额批量部署模型
 #   4) 把已有部署的容量扩到剩余配额上限
 #   5) 导出 Foundry Endpoint 与 API Key（补导出 / 全量盘点，任意时间可独立运行）
+#   6) 查询 CSV 订阅的 Azure OpenAI Quota Tier
 #
 # 不带 --stage 参数运行时进入交互式菜单。
 #
@@ -25,7 +26,7 @@ fi
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.0.4"
+SCRIPT_VERSION="1.0.5"
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 TENANT_ID=""
@@ -65,6 +66,9 @@ usage() {
   # 5. 导出 Foundry Endpoint 与 API Key（任意时间独立运行）：
   bash Azure_Foundry_AI_Automation.sh --tenant-id <TENANT-ID> --stage ExportCredentials
 
+  # 6. 查询 CSV 订阅的 Azure OpenAI Quota Tier：
+  bash Azure_Foundry_AI_Automation.sh --tenant-id <TENANT-ID> --stage QueryQuotaTier
+
 参数：
   --tenant-id GUID   客户 Microsoft Entra 租户 ID。必填。
   --stage NAME       指定阶段，省略时进入交互式菜单。可选值：
@@ -73,6 +77,7 @@ usage() {
                        DeployModels        阶段 3：按剩余配额批量部署 CSV 中的模型
                        ScaleUpQuota        阶段 4：把已有部署的容量扩到剩余配额上限
                        ExportCredentials   阶段 5：导出 Foundry Endpoint 与 API Key（补导出 / 全量盘点，两种模式交互选择）
+                       QueryQuotaTier      阶段 6：查询 CSV 订阅的 Azure OpenAI Quota Tier
                        All                 全流程：依次执行前三个阶段（1 -> 2 -> 3），阶段 1 同样仅限 EA
 
 【EA / CSP 提示】阶段 1（含 All 内的阶段 1）通过 Microsoft.Subscription/aliases API 自助创建订阅，
@@ -1476,6 +1481,100 @@ stage_export_credentials() {
   esac
 }
 
+# ==================== 阶段 6：查询 Azure OpenAI Quota Tier ====================
+
+stage_query_quota_tier() {
+  log_info '========== 阶段：查询 Azure OpenAI Quota Tier =========='
+  log_warn 'Quota Tier 接口使用预览 API（2025-10-01-preview），字段和行为可能由 Microsoft 调整。'
+
+  local ids=() line
+  while IFS= read -r line; do
+    case "$line" in
+      WARN:*) log_warn "  ${line#WARN:}" ;;
+      ERR:*) log_error "${line#ERR:}"; return 1 ;;
+      ID:*) ids+=("${line#ID:}") ;;
+    esac
+  done < <(get_csv_subscription_ids)
+
+  if [[ ${#ids[@]} -eq 0 ]]; then
+    log_error 'CSV 中没有填写任何合法的 SubscriptionId，无法查询 Quota Tier。'
+    return 1
+  fi
+
+  load_account_list
+  local target_ids=() target_names=() id
+  for id in "${ids[@]}"; do
+    local match actual_tenant actual_state actual_name
+    match=$(printf '%s' "$ACCOUNT_LIST_JSON" | jq -c --arg id "$id" \
+      'map(select((.id // "" | ascii_downcase) == $id)) | .[0] // empty')
+    if [[ -z "$match" ]]; then
+      log_warn "订阅 '$id' 当前登录账号不可见，或未启用，已跳过。"
+      continue
+    fi
+    actual_tenant=$(printf '%s' "$match" | jq -r '.tenantId // ""' | tr '[:upper:]' '[:lower:]')
+    actual_state=$(printf '%s' "$match" | jq -r '.state // ""')
+    if [[ "$actual_tenant" != "$(printf '%s' "$TENANT_ID" | tr '[:upper:]' '[:lower:]')" || "$actual_state" != "Enabled" ]]; then
+      log_warn "订阅 '$id' 不属于租户 ${TENANT_ID}，或未启用，已跳过。"
+      continue
+    fi
+    actual_name=$(printf '%s' "$match" | jq -r '.name // ""')
+    target_ids+=("$id")
+    target_names+=("$actual_name")
+  done
+
+  if [[ ${#target_ids[@]} -eq 0 ]]; then
+    log_warn '没有可查询的订阅。'
+    return 0
+  fi
+
+  echo '' >&2
+  echo '将查询以下订阅的 Quota Tier：' >&2
+  local i
+  for ((i = 0; i < ${#target_ids[@]}; i++)); do
+    printf '  %s | %s\n' "${target_names[$i]}" "${target_ids[$i]}" >&2
+  done
+  confirm_execution "将查询 ${#target_ids[@]} 个订阅的 Azure OpenAI Quota Tier" || return 0
+
+  write_result_header 'stage6_subscription_quota_tier' SubscriptionName SubscriptionId QuotaTier AssignmentDate TierUpgradePolicy Status ErrorMessage
+
+  local ok=0
+  for ((i = 0; i < ${#target_ids[@]}; i++)); do
+    local sub_id="${target_ids[$i]}" sub_name="${target_names[$i]}"
+    local tier="" assignment_date="" upgrade_policy="" status="Pending" error_message=""
+    local url response tier_json
+    log_info "查询订阅 '$sub_name'（${sub_id}）的 Quota Tier"
+    url="https://management.azure.com/subscriptions/${sub_id}/providers/Microsoft.CognitiveServices/quotaTiers?api-version=2025-10-01-preview"
+    if ! response=$(az_rest GET "$url" 2>"$TEMP_DIR/quota_tier.err"); then
+      status="Failed"
+      ok=1
+      error_message=$(tr '\n' ' ' < "$TEMP_DIR/quota_tier.err")
+      log_warn "  查询订阅 '$sub_name' 失败：$error_message"
+    else
+      tier_json=$(printf '%s' "$response" | jq -c '(.value // []) as $v | ([$v[] | select(.name == "default")][0] // $v[0] // empty)')
+      if [[ -z "$tier_json" ]]; then
+        status="NoData"
+        error_message="API 未返回 Quota Tier 记录。"
+        log_warn "  订阅 '$sub_name' 未返回 Quota Tier 记录。"
+      else
+        tier=$(printf '%s' "$tier_json" | jq -r '.properties.currentTierName // ""')
+        assignment_date=$(printf '%s' "$tier_json" | jq -r '.properties.assignmentDate // ""')
+        upgrade_policy=$(printf '%s' "$tier_json" | jq -r '.properties.tierUpgradePolicy // ""')
+        if [[ -z "$tier" ]]; then
+          status="NoData"
+          error_message="API 返回记录但 currentTierName 为空。"
+        else
+          status="Succeeded"
+        fi
+        log_info "  ${sub_name}：$tier"
+      fi
+    fi
+    write_result_row "$sub_name" "$sub_id" "$tier" "$assignment_date" "$upgrade_policy" "$status" "$error_message"
+  done
+
+  log_info "结果文件：$RESULT_FILE"
+  return $ok
+}
+
 # ==================== 交互菜单与入口 ====================
 
 show_menu() {
@@ -1487,7 +1586,8 @@ show_menu() {
   3) 批量部署模型（按剩余配额）
   4) 批量扩容已有部署配额
   5) 导出 Foundry Endpoint 与 API Key（补导出 / 全量盘点）
-  6) 全流程（1 -> 2 -> 3）
+  6) 查询 Azure OpenAI Quota Tier
+  7) 全流程（1 -> 2 -> 3）
   0) 退出
 
 EOF
@@ -1500,7 +1600,8 @@ EOF
     3) printf 'DeployModels' ;;
     4) printf 'ScaleUpQuota' ;;
     5) printf 'ExportCredentials' ;;
-    6) printf 'All' ;;
+    6) printf 'QueryQuotaTier' ;;
+    7) printf 'All' ;;
     0) printf '' ;;
     *) echo "无效选项：$choice" >&2; exit 2 ;;
   esac
@@ -1537,6 +1638,7 @@ case "$STAGE" in
   DeployModels) stage_deploy_models || EXIT_CODE=1 ;;
   ScaleUpQuota) stage_scale_up_quota || EXIT_CODE=1 ;;
   ExportCredentials) stage_export_credentials || EXIT_CODE=1 ;;
+  QueryQuotaTier) stage_query_quota_tier || EXIT_CODE=1 ;;
   All)
     stage_create_subscription || EXIT_CODE=1
     stage_create_foundry || EXIT_CODE=1

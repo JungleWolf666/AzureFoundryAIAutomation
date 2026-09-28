@@ -1,9 +1,9 @@
 <#
 .SYNOPSIS
-    Azure Foundry AI 一站式全生命周期统一脚本：创建 Azure 订阅、创建 Foundry 服务和项目、批量部署模型、批量扩容配额。
+    Azure Foundry AI 一站式全生命周期统一脚本：创建订阅和 Foundry 资源、部署模型、扩容配额、导出凭据、查询 Quota Tier。
 
 .DESCRIPTION
-    五个自动化阶段的参数全部来自同一个 CSV。
+    六个自动化阶段的参数全部来自同一个 CSV。
     不带 -Stage 参数运行时进入交互式菜单。
 
 .NOTES
@@ -15,7 +15,7 @@
 [CmdletBinding()]
 param(
     [string]$TenantId,
-    [ValidateSet('CreateSubscription', 'CreateFoundry', 'DeployModels', 'ScaleUpQuota', 'ExportCredentials', 'All')]
+    [ValidateSet('CreateSubscription', 'CreateFoundry', 'DeployModels', 'ScaleUpQuota', 'ExportCredentials', 'QueryQuotaTier', 'All')]
     [string]$Stage,
     [string]$Csv = (Join-Path $PSScriptRoot 'Azure_Foundry_AI_Plan.csv'),
     [string]$OutputRoot = $PSScriptRoot,
@@ -27,7 +27,7 @@ param(
     [switch]$Help
 )
 
-$ScriptVersion = '1.0.4'
+$ScriptVersion = '1.0.5'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -68,6 +68,7 @@ if ($Help) {
   .\Azure_Foundry_AI_Automation.ps1 -TenantId <TENANT-ID> -Stage DeployModels
   .\Azure_Foundry_AI_Automation.ps1 -TenantId <TENANT-ID> -Stage ScaleUpQuota
   .\Azure_Foundry_AI_Automation.ps1 -TenantId <TENANT-ID> -Stage ExportCredentials
+    .\Azure_Foundry_AI_Automation.ps1 -TenantId <TENANT-ID> -Stage QueryQuotaTier
 
   # 4. 全流程依次执行阶段 1 -> 2 -> 3：
   .\Azure_Foundry_AI_Automation.ps1 -TenantId <TENANT-ID> -Stage All -DryRun
@@ -81,6 +82,7 @@ if ($Help) {
                      DeployModels        阶段 3：按剩余配额批量部署 CSV 中的模型
                      ScaleUpQuota        阶段 4：把已有部署的容量扩到剩余配额上限
                      ExportCredentials   阶段 5：导出 Foundry Endpoint 与 API Key（补导出 / 全量盘点，两种模式交互选择）
+                     QueryQuotaTier      阶段 6：查询 CSV 订阅的 Azure OpenAI Quota Tier
                      All                 全流程：依次执行前三个阶段（1 -> 2 -> 3），阶段 1 同样仅限 EA
 
 【EA / CSP 提示】阶段 1（含 All 里的阶段 1）通过 Microsoft.Subscription/aliases API 自助创建订阅，
@@ -1225,6 +1227,85 @@ function Invoke-StageExportCredentials {
     }
 }
 
+# ==================== 阶段 6：查询 Azure OpenAI Quota Tier ====================
+
+function Invoke-StageQueryQuotaTier {
+    Write-Info '========== 阶段：查询 Azure OpenAI Quota Tier =========='
+    Write-Warn 'Quota Tier 接口使用预览 API（2025-10-01-preview），字段和行为可能由 Microsoft 调整。'
+
+    $ids = @(Get-CsvSubscriptionIds)
+    if ($ids.Count -eq 0) { throw 'CSV 中没有填写任何合法的 SubscriptionId，无法查询 Quota Tier。' }
+
+    $allSubs = @(Invoke-AzJson -Arguments @('account', 'list', '--all'))
+    $tenantSubs = @($allSubs | Where-Object {
+            ([string](Get-Prop $_ 'tenantId')).ToLowerInvariant() -eq $TenantId.ToLowerInvariant() -and
+            ([string](Get-Prop $_ 'state')) -eq 'Enabled'
+        })
+    $targetSubs = @($tenantSubs | Where-Object { $ids -contains ([string](Get-Prop $_ 'id')).ToLowerInvariant() })
+
+    $foundIds = @($targetSubs | ForEach-Object { ([string](Get-Prop $_ 'id')).ToLowerInvariant() })
+    foreach ($id in $ids) {
+        if ($foundIds -notcontains $id) { Write-Warn "订阅 '$id' 当前登录账号不可见，或不属于租户 $TenantId，或未启用，已跳过。" }
+    }
+    if ($targetSubs.Count -eq 0) { Write-Warn '没有可查询的订阅。'; return $true }
+
+    Write-Host ''
+    Write-Host '将查询以下订阅的 Quota Tier：'
+    foreach ($sub in $targetSubs) {
+        Write-Host ("  {0} | {1}" -f (Get-Prop $sub 'name'), (Get-Prop $sub 'id'))
+    }
+    if (-not (Confirm-Execution "将查询 $($targetSubs.Count) 个订阅的 Azure OpenAI Quota Tier")) { return $true }
+
+    $results = New-Object System.Collections.Generic.List[object]
+    $ok = $true
+    foreach ($sub in $targetSubs) {
+        $subId = [string](Get-Prop $sub 'id')
+        $subName = [string](Get-Prop $sub 'name')
+        $tier = ''; $assignmentDate = ''; $upgradePolicy = ''; $status = 'Pending'; $errorMessage = ''
+        Write-Info "查询订阅 '$subName'（$subId）的 Quota Tier"
+        try {
+            $url = "https://management.azure.com/subscriptions/$subId/providers/Microsoft.CognitiveServices/quotaTiers?api-version=2025-10-01-preview"
+            $response = Invoke-AzRest -Method 'GET' -Url $url
+            if ($response.ExitCode -ne 0) { throw $response.Text }
+            $items = @((($response.Text | ConvertFrom-Json).value))
+            $defaultTier = @($items | Where-Object { [string](Get-Prop $_ 'name') -eq 'default' }) | Select-Object -First 1
+            if ($null -eq $defaultTier) { $defaultTier = $items | Select-Object -First 1 }
+            if ($null -eq $defaultTier) {
+                $status = 'NoData'
+                $errorMessage = 'API 未返回 Quota Tier 记录。'
+                Write-Warn "  订阅 '$subName' 未返回 Quota Tier 记录。"
+            }
+            else {
+                $tier = [string](Get-Prop $defaultTier 'properties.currentTierName')
+                $assignmentValue = Get-Prop $defaultTier 'properties.assignmentDate'
+                $assignmentDate = if ($assignmentValue -is [datetime]) { $assignmentValue.ToUniversalTime().ToString('o') } else { [string]$assignmentValue }
+                $upgradePolicy = [string](Get-Prop $defaultTier 'properties.tierUpgradePolicy')
+                $status = if ([string]::IsNullOrWhiteSpace($tier)) { 'NoData' } else { 'Succeeded' }
+                if ($status -eq 'NoData') { $errorMessage = 'API 返回记录但 currentTierName 为空。' }
+                Write-Info "  $subName：$tier"
+            }
+        }
+        catch {
+            $status = 'Failed'
+            $errorMessage = "$($_.Exception.Message)"
+            $ok = $false
+            Write-Warn "  查询订阅 '$subName' 失败：$errorMessage"
+        }
+        $results.Add([pscustomobject]@{
+                SubscriptionName = $subName
+                SubscriptionId   = $subId
+                QuotaTier        = $tier
+                AssignmentDate   = $assignmentDate
+                TierUpgradePolicy = $upgradePolicy
+                Status           = $status
+                ErrorMessage     = $errorMessage
+            })
+    }
+
+    Save-ResultCsv -Name 'stage6_subscription_quota_tier' -Rows $results.ToArray()
+    $ok
+}
+
 # ==================== 交互菜单与入口 ====================
 
 function Show-Menu {
@@ -1235,7 +1316,8 @@ function Show-Menu {
     Write-Host '  3) 批量部署模型（按剩余配额）'
     Write-Host '  4) 批量扩容已有部署配额'
     Write-Host '  5) 导出 Foundry Endpoint 与 API Key（补导出 / 全量盘点）'
-    Write-Host '  6) 全流程（1 -> 2 -> 3）'
+    Write-Host '  6) 查询 Azure OpenAI Quota Tier'
+    Write-Host '  7) 全流程（1 -> 2 -> 3）'
     Write-Host '  0) 退出'
     Write-Host ''
     $choice = Read-Host '请选择要执行的阶段'
@@ -1245,7 +1327,8 @@ function Show-Menu {
         '3' { 'DeployModels' }
         '4' { 'ScaleUpQuota' }
         '5' { 'ExportCredentials' }
-        '6' { 'All' }
+        '6' { 'QueryQuotaTier' }
+        '7' { 'All' }
         '0' { '' }
         default { throw "无效选项：$choice" }
     }
@@ -1284,6 +1367,7 @@ try {
         'DeployModels' { Invoke-StageDeployModels }
         'ScaleUpQuota' { Invoke-StageScaleUpQuota }
         'ExportCredentials' { Invoke-StageExportCredentials }
+        'QueryQuotaTier' { Invoke-StageQueryQuotaTier }
         'All' {
             $r1 = Invoke-StageCreateSubscription
             $r2 = Invoke-StageCreateFoundry

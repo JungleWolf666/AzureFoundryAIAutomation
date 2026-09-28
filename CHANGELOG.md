@@ -1,5 +1,17 @@
 # 更新记录
 
+## [1.0.5] - 2026-09-28
+
+### 新增
+
+- 新增第 6 阶段 `QueryQuotaTier`，按 CSV 中明确填写的 `SubscriptionId` 查询订阅级 Azure OpenAI Quota Tier。
+- PowerShell 与 Bash 版本均通过 ARM 控制面预览 API `2025-10-01-preview` 查询并导出 `QuotaTier`、`AssignmentDate`、`TierUpgradePolicy`、状态和错误信息。
+- 单个订阅查询失败不会中断其他订阅；不可见、跨租户、未启用或格式错误的订阅会跳过并给出明确提示。
+
+### 调整
+
+- 菜单新增 Quota Tier 查询为第 6 项，原“全流程”后移为第 7 项；README 补充独立运行命令、输出文件和预览 API 注意事项。
+
 ## [1.0.4] - 2026-09-21
 
 ### 新增
